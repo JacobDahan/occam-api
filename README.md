@@ -193,6 +193,38 @@ The application uses a centralized error handling approach:
 
 All errors return JSON with an `error` field for client consumption.
 
+### Request ID Tracing
+
+The API implements comprehensive request ID tracing for tracking concurrent requests:
+
+**Features**:
+- Every request automatically gets a unique UUID v4 request ID
+- Request IDs are included in all log entries via tracing spans
+- Custom request IDs can be provided via the `x-request-id` header
+- Request IDs are returned in the `x-request-id` response header
+- Enables easy correlation of logs across distributed systems
+
+**Usage**:
+```bash
+# Auto-generated request ID
+curl -i http://localhost:3000/api/v1/titles/search?q=inception
+# Response includes: x-request-id: 6c628d97-e9a3-40c2-9913-b8d76dc3d920
+
+# Custom request ID (useful for distributed tracing)
+curl -i -H "x-request-id: 12345678-1234-1234-1234-123456789012" \
+  http://localhost:3000/api/v1/titles/search?q=matrix
+# Response includes: x-request-id: 12345678-1234-1234-1234-123456789012
+```
+
+**Log Output**:
+All tracing logs include the request ID, making it easy to filter concurrent requests:
+```
+INFO http_request{method=GET uri=/api/v1/titles/search?q=inception request_id=6c628d97-e9a3-40c2-9913-b8d76dc3d920}
+INFO request_id=6c628d97-e9a3-40c2-9913-b8d76dc3d920 query=inception: Processing title search request
+DEBUG request_id=6c628d97-e9a3-40c2-9913-b8d76dc3d920 query=inception: Fetching titles from external API
+INFO request_id=6c628d97-e9a3-40c2-9913-b8d76dc3d920 results_count=20: Title search completed
+```
+
 ### Configuration
 
 Environment-based configuration via `.env` file:
@@ -318,6 +350,8 @@ occam-api/
 │   ├── error.rs             # Error handling
 │   ├── models/              # Data models
 │   ├── db/                  # Database and cache connections
+│   ├── middleware/          # HTTP middleware
+│   │   └── request_id.rs    # Request ID generation and tracing
 │   ├── routes/              # HTTP route handlers
 │   └── services/            # Business logic
 │       ├── title_search.rs

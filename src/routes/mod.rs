@@ -1,13 +1,15 @@
 use axum::{
     http::StatusCode,
+    middleware,
     routing::{get, post},
     Json, Router,
 };
 use serde_json::{json, Value};
 use std::sync::Arc;
-use tower_http::trace::{DefaultMakeSpan, DefaultOnResponse, TraceLayer};
+use tower_http::trace::{DefaultOnResponse, TraceLayer};
 use tracing::Level;
 
+use crate::middleware::request_id;
 use crate::services::title_search::TitleSearcher;
 
 pub mod titles;
@@ -26,9 +28,10 @@ pub fn create_router(state: AppState) -> Router {
         .fallback(handler_404)
         .layer(
             TraceLayer::new_for_http()
-                .make_span_with(DefaultMakeSpan::new().level(Level::INFO))
+                .make_span_with(request_id::make_span_with_request_id)
                 .on_response(DefaultOnResponse::new().level(Level::INFO)),
         )
+        .layer(middleware::from_fn(request_id::request_id_middleware))
         .with_state(state.title_searcher)
 }
 

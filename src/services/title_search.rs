@@ -41,6 +41,8 @@ impl TitleSearchService {
     async fn fetch_from_api(&self, query: &str) -> AppResult<Vec<ApiShow>> {
         let url = format!("{}/shows/search/title", self.api_url);
 
+        tracing::debug!(query = %query, "Fetching titles from external API");
+
         let response = self
             .http_client
             .get(&url)
@@ -52,6 +54,11 @@ impl TitleSearchService {
         if !response.status().is_success() {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
+            tracing::error!(
+                query = %query,
+                status = %status,
+                "External API request failed"
+            );
             return Err(AppError::ExternalApi(format!(
                 "API returned status {}: {}",
                 status, body
@@ -59,6 +66,11 @@ impl TitleSearchService {
         }
 
         let shows: ApiSearchResponse = response.json().await?;
+        tracing::debug!(
+            query = %query,
+            results_count = shows.0.len(),
+            "Successfully fetched titles from API"
+        );
         Ok(shows.0)
     }
 
