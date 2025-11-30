@@ -6,6 +6,9 @@ mod routes;
 mod services;
 
 use config::Config;
+use routes::AppState;
+use services::title_search::TitleSearchService;
+use std::sync::Arc;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 #[tokio::main]
@@ -31,11 +34,21 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("Migrations complete");
 
     // Initialize Redis client
-    let _redis_client = db::create_redis_client(&config.redis_url)?;
+    let redis_client = db::create_redis_client(&config.redis_url)?;
     tracing::info!("Connected to Redis");
 
+    // Initialize services
+    let title_searcher = Arc::new(TitleSearchService::new(
+        redis_client,
+        config.streaming_api_key.clone(),
+        config.streaming_api_url.clone(),
+    ));
+
+    // Create application state
+    let app_state = AppState { title_searcher };
+
     // Create application router
-    let app = routes::create_router();
+    let app = routes::create_router(app_state);
 
     // Create server address
     let addr = format!("{}:{}", config.host, config.port);

@@ -35,3 +35,10 @@ envy = "0.4"
 # Logging & Tracing
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Async traits
+async-trait = "0.1"
+
+[dev-dependencies]
+mockall = "0.13"
+tokio-test = "0.4"
