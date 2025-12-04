@@ -13,8 +13,8 @@ Backend API for the Occam streaming service optimizer. Occam helps customers fin
 - **Framework**: Axum (Rust web framework)
 - **Database**: PostgreSQL
 - **Cache**: Redis
-- **Solver**: Integer programming (good_lp with CBC solver)
-- **External API**: Streaming Availability API
+- **Solver**: Integer programming (good_lp with microlp - pure Rust MILP solver)
+- **External API**: Streaming Availability API via RapidAPI
 
 ## Architecture
 
@@ -78,56 +78,102 @@ The title search service:
 #### 2. Optimization Flow
 
 ```
-User Request → Route Handler → Service Layer
+User Request → Route Handler → Optimization Service
    │                               │
    │ {must_have, nice_to_have}     │
    │                               ▼
-   │                    Query availability data for each title
-   │                    (cached in PostgreSQL from previous searches)
+   │                    Fetch availability data for each title
+   │                    (parallel API calls with Redis caching)
+   │                               │
+   │                               ▼
+   │                    Query service pricing from PostgreSQL
+   │                    (seeded data for Netflix, Hulu, etc.)
    │                               │
    │                               ▼
    │                    Build integer programming model:
    │                    - Variables: binary for each service
    │                    - Constraints: must_have titles covered
-   │                    - Objective: min cost, max nice_to_have
+   │                    - Objective: min cost + small bonus for nice_to_have
    │                               │
    │                               ▼
-   │                    Solve with CBC solver (good_lp)
+   │                    Solve with microlp (pure Rust solver)
    │                               │
    │                               ▼
-   │                    Generate alternatives (relaxed constraints)
+   │                    Extract selected services + calculate coverage
    │                               │
    └───────────────────────────────▼
-                            Return optimal subset + alternatives
+                            Return optimal subset with stats
 ```
 
 The optimization service:
-- Receives lists of "must have" and "nice to have" title IDs
-- Queries which streaming services have each title (from cache/database)
-- Formulates as an integer programming problem:
-  - **Decision variables**: Binary variable for each service (selected or not)
-  - **Hard constraint**: All "must have" titles must be covered
-  - **Primary objective**: Minimize total monthly cost
-  - **Secondary objective**: Maximize "nice to have" titles covered
-- Uses the CBC (COIN-OR Branch and Cut) solver via good_lp
-- Generates 2-3 alternative solutions with different cost/coverage trade-offs
-- Returns the optimal solution with alternatives
+- Receives lists of "must have" and "nice to have" IMDB IDs
+- **Fetches availability data** from AvailabilityService:
+  - Parallel API calls using tokio tasks for each title
+  - Checks Redis cache first (key: `avail:{imdb_id}`, TTL: 1 week)
+  - On cache miss, queries Streaming Availability API
+  - Only considers subscription-based services (not rentals/purchases)
+- **Queries service pricing** from PostgreSQL `streaming_services` table
+  - Pre-seeded with current US pricing (Netflix: $15.49, Hulu: $7.99, etc.)
+  - Services not in database are logged and skipped
+- **Formulates integer programming problem**:
+  - **Decision variables**: Binary variable for each service (0 = not selected, 1 = selected)
+  - **Hard constraint**: All "must have" titles must be covered by at least one selected service
+  - **Objective function**: Minimize `total_cost - 0.1 × nice_to_have_coverage`
+    - Primary goal: Minimize monthly subscription cost
+    - Secondary goal: Small bonus (0.1) for each nice-to-have title covered
+    - Cost dominates, so solver won't add expensive services just for nice-to-haves
+- **Solves using microlp** (pure Rust MILP solver, no system dependencies)
+- **Returns optimal solution** with:
+  - Selected streaming services with pricing
+  - Total monthly cost
+  - Must-have coverage count (always equals total must-haves)
+  - Nice-to-have coverage count
 
 **Example Optimization**:
 ```
-Must Have: [Title A, Title B]
-Nice to Have: [Title C, Title D]
+Input:
+  Must Have: [tt1375666 (Inception), tt0468569 (The Dark Knight)]
+  Nice to Have: [tt0816692 (Interstellar)]
 
-Services:
-- Netflix ($15/mo): Has A, C
-- Hulu ($8/mo): Has B, D
-- HBO Max ($16/mo): Has A, B, C
+Availability Data (from API):
+  - Inception: Available on Netflix, HBO Max
+  - The Dark Knight: Available on HBO Max
+  - Interstellar: Available on Netflix, Paramount+
 
-Optimal Solution: Netflix + Hulu
-- Cost: $23/mo
-- Coverage: All must-haves + all nice-to-haves
-- Alternative: HBO Max alone ($16) covers must-haves but only 1 nice-to-have
+Service Pricing (from database):
+  - Netflix: $15.49/mo
+  - HBO Max: $15.99/mo
+  - Paramount+: $5.99/mo
+
+Integer Programming Model:
+  Variables: x_netflix, x_hbo, x_paramount (binary)
+  Constraints:
+    - Inception covered: x_netflix + x_hbo >= 1
+    - Dark Knight covered: x_hbo >= 1
+  Objective: Minimize (15.49·x_netflix + 15.99·x_hbo + 5.99·x_paramount - weight·coverage)
+
+Configuration 1 (Optimal - Cost-focused):
+  - Services: HBO Max only
+  - Cost: $15.99/mo
+  - Must-have coverage: 2/2 (100%)
+  - Nice-to-have coverage: 0/1 (0%)
+  - Reasoning: HBO Max covers both must-haves. Adding Netflix ($15.49)
+    would cost $31.48 total for only 0.1 benefit (nice-to-have bonus).
+
+Configuration 2 (Coverage-focused):
+  - Services: HBO Max + Netflix
+  - Cost: $31.48/mo
+  - Must-have coverage: 2/2 (100%)
+  - Nice-to-have coverage: 1/1 (100%)
+  - Reasoning: Maximizes nice-to-have coverage at higher cost
 ```
+
+**Configuration Generation**:
+The optimizer generates service configurations by solving the optimization problem with progressively higher weights for nice-to-have coverage (0.1, 1.0, 3.0, 10.0, 100.0). This creates a natural spectrum of solutions:
+- Lower weights (0.1) → Most cost-optimal solution
+- Higher weights (100.0) → Most coverage-optimal solution
+
+Duplicate configurations (same service combinations) are filtered out, resulting in up to 5 unique configurations ordered from cost-focused to coverage-focused. Users can review the spectrum and choose the configuration that best fits their budget and preferences.
 
 #### 3. Recommendations Flow
 
@@ -170,16 +216,32 @@ The recommendations service:
 
 ### Caching Strategy
 
-**Redis** is used for short-term, high-frequency data:
-- API search results (1 hour TTL)
-- Streaming availability lookups (24 hour TTL)
-- Rate limiting counters
+**Redis-only** for streaming availability data:
+- **Title search results**: 1 hour TTL (key: `search:{query}`)
+  - Cache hit: ~4ms response time
+  - Cache miss: ~2600ms (external API call)
+- **Streaming availability**: 1 week TTL (key: `avail:{imdb_id}`)
+  - Fetched on-demand during optimization requests
+  - Parallel fetching using tokio tasks
+  - Partial failures allowed (returns successful fetches)
+- **API usage tracking**: Redis counters
+  - Monthly quota: `api_usage:{YYYY-MM}` (25K requests/month on PRO tier)
+  - Daily usage: `api_usage:daily:{YYYY-MM-DD}` (for monitoring)
+  - Warning logged at 80% monthly quota
 
-**PostgreSQL** is used for persistent data:
-- Title metadata (synced from API)
-- Service pricing and availability mappings
-- User preferences and history (future feature)
-- Optimization results for analytics
+**PostgreSQL** for persistent configuration:
+- **Service catalog**: `streaming_services` table
+  - Pre-seeded with 10 major US services and pricing
+  - Used by optimization solver (Netflix: $15.49, Hulu: $7.99, etc.)
+  - Columns: id, name, base_monthly_cost, country, active
+- **API usage analytics**: `api_usage_log` table (optional tracking)
+- **Optimization requests**: `optimization_requests` table (future analytics)
+
+**Why Redis-only for availability?**
+- Simplicity: Single cache layer, easy to reason about
+- Performance: Faster than two-tier cache (no PostgreSQL query overhead)
+- Acceptable worst-case: Redis restart means re-warming cache over days (well within API quota)
+- High cache hit rate: 1-week TTL gives ~80% hit rate after initial week
 
 ### Error Handling
 
@@ -263,6 +325,8 @@ Configuration is loaded at startup using the `envy` crate for type-safe environm
    docker-compose up -d
    ```
 
+   **IMPORTANT**: SQLx requires a running PostgreSQL database at compile time to verify SQL queries. You MUST keep Postgres running during development.
+
 4. **Build and run the API**
    ```bash
    cargo run
@@ -270,16 +334,52 @@ Configuration is loaded at startup using the `envy` crate for type-safe environm
 
    The server will start on `http://127.0.0.1:3000`
 
-### Testing
+### Development Commands
 
-Run the health check endpoint:
+**IMPORTANT**: SQLx requires PostgreSQL running at compile time to verify SQL queries.
+
 ```bash
-curl http://localhost:3000/health
+# First-time setup
+docker-compose up -d postgres redis
+cargo install sqlx-cli --no-default-features --features postgres
+cargo sqlx migrate run
+
+# Build and run the API locally
+cargo run
+
+# Run tests
+cargo test
+
+# Check code compiles (faster than full build)
+cargo check
 ```
 
-Expected response:
-```json
-{"status": "healthy"}
+**Common Operations:**
+
+```bash
+# Check service status
+docker-compose ps
+
+# View logs
+docker-compose logs postgres
+docker-compose logs redis
+
+# Stop services (keeps data)
+docker-compose down
+
+# Wipe all data and start fresh
+docker-compose down -v
+docker-compose up -d postgres redis
+
+# Clear Redis cache only
+docker-compose exec redis redis-cli FLUSHALL
+
+# Rebuild and run API in Docker
+docker-compose up -d --build
+docker-compose logs -f api
+
+# Health check
+curl http://localhost:3000/health
 ```
 
 ## API Endpoints
@@ -319,7 +419,7 @@ Features:
 - Supports both movies and series
 
 ### Optimization
-```
+```bash
 POST /api/v1/optimize
 Content-Type: application/json
 
@@ -328,6 +428,59 @@ Content-Type: application/json
   "nice_to_have": ["tt0468569"]  // The Dark Knight IMDB ID
 }
 ```
+
+**Status**: ✅ **Implemented**
+
+Example response:
+```json
+{
+  "configurations": [
+    {
+      "services": [
+        {
+          "id": "hbo_max",
+          "name": "Max",
+          "monthly_cost": 15.99
+        }
+      ],
+      "total_cost": 15.99,
+      "must_have_coverage": 2,
+      "nice_to_have_coverage": 0
+    },
+    {
+      "services": [
+        {
+          "id": "hbo_max",
+          "name": "Max",
+          "monthly_cost": 15.99
+        },
+        {
+          "id": "netflix",
+          "name": "Netflix",
+          "monthly_cost": 15.49
+        }
+      ],
+      "total_cost": 31.48,
+      "must_have_coverage": 2,
+      "nice_to_have_coverage": 1
+    }
+  ],
+  "unavailable_must_have": [],
+  "unavailable_nice_to_have": []
+}
+```
+
+Features:
+- Fetches streaming availability from Streaming Availability API
+- Parallel API calls with 1-week Redis caching
+- Queries service pricing from PostgreSQL
+- Solves integer programming problem using microlp (pure Rust)
+- Prioritizes cost minimization over nice-to-have coverage
+- Returns optimal service subset with coverage statistics
+- **Returns ordered list of service configurations (cost-optimal to coverage-optimal)**
+- **Up to 5 unique configurations with different cost/coverage trade-offs**
+- Graceful handling of partial API failures
+- Rate limiting with quota tracking (25K requests/month)
 
 ### Recommendations
 ```
@@ -348,22 +501,32 @@ occam-api/
 │   ├── main.rs              # Application entry point
 │   ├── config.rs            # Configuration management
 │   ├── error.rs             # Error handling
-│   ├── models/              # Data models
+│   ├── models/
+│   │   └── mod.rs           # Data models (Title, StreamingAvailability, etc.)
 │   ├── db/                  # Database and cache connections
 │   ├── middleware/          # HTTP middleware
 │   │   └── request_id.rs    # Request ID generation and tracing
 │   ├── routes/              # HTTP route handlers
+│   │   ├── mod.rs           # AppState and router setup
+│   │   ├── titles.rs        # Title search endpoint
+│   │   ├── optimize.rs      # Optimization endpoint
+│   │   └── recommendations.rs
 │   └── services/            # Business logic
-│       ├── title_search.rs
-│       ├── optimization.rs
+│       ├── title_search.rs  # Title search with Redis caching
+│       ├── availability.rs  # Streaming availability fetching
+│       ├── optimization.rs  # Integer programming solver
 │       └── recommendations.rs
 ├── migrations/              # Database migrations
-└── docker-compose.yml       # Local development services
+│   ├── 001_create_availability_schema.sql
+│   └── 002_seed_streaming_services.sql
+├── Dockerfile               # Multi-stage Rust build
+└── docker-compose.yml       # PostgreSQL, Redis, and API services
 ```
 
 ## Implementation Status
 
 ### Completed ✅
+
 1. **Title Search Service**: Fully implemented with Redis caching
    - Streaming Availability API integration
    - 1-hour Redis cache with automatic TTL
@@ -371,33 +534,69 @@ occam-api/
    - Unit tests for model conversion
    - Trait-based design for easy mocking
 
+2. **Availability Service**: Streaming availability data fetching
+   - Parallel API calls using tokio tasks
+   - Redis-only caching (1-week TTL)
+   - Rate limiting with quota tracking (25K/month)
+   - Graceful partial failure handling
+   - Only includes pricing for rentals/purchases (NOT subscriptions)
+   - Unit tests for API response conversion and type filtering
+
+3. **Optimization Service**: Integer programming solver
+   - Database-sourced service pricing (PostgreSQL)
+   - On-demand availability fetching with caching
+   - Integer programming using microlp (pure Rust, no system dependencies)
+   - Cost-optimized service selection with nice-to-have bonus
+   - **Generates up to 5 configurations with increasing weights (0.1, 1.0, 3.0, 10.0, 100.0)**
+   - **Configuration deduplication to remove duplicate service combinations**
+   - Comprehensive unit tests (9 tests, all deterministic)
+   - Performance: 105-800ms total optimization time
+
+4. **Database Schema**: PostgreSQL tables
+   - `streaming_services`: Service catalog with pricing (10 pre-seeded services)
+   - `api_usage_log`: API call tracking for analytics
+   - `optimization_requests`: Request history for future analytics
+
+5. **Docker Deployment**: Multi-stage containerization
+   - Rust builder stage with optimized release build
+   - Debian slim runtime with minimal dependencies
+   - Docker Compose orchestration (PostgreSQL, Redis, API)
+   - Health checks for all services
+   - Proper networking (0.0.0.0 binding for container access)
+
 ### In Progress 🚧
-2. **Optimization Service**: Not yet implemented
-3. **Recommendations Service**: Not yet implemented
+
+**Recommendations Service**: Not yet implemented
 
 ### To Do 📋
 
 #### Core Features
-1. **Optimization Service**: Implement integer programming solver
-2. **Recommendations Service**: Build recommendation algorithm
-3. **Database Schema**: Create tables for persistent title/service data
-4. **Service Data**: Map streaming service pricing and availability
+1. **Recommendations Service**: Build content-based filtering algorithm
 
-#### Production Hardening (Title Search)
-5. **Rate Limiting**: Track API quota usage in Redis, return 429 when approaching limits
-6. **Metrics & Monitoring**:
-   - Count API calls, cache hits/misses, errors
-   - Log quota remaining
+#### Production Hardening
+2. **Optimization Service**:
+   - Add input validation (max titles per request)
+   - Handle edge cases (no services available for must-haves)
+   - Return 429 when quota exceeded
+3. **Availability Service**:
+   - Retry logic for transient API failures
+   - Circuit breaker pattern for API outages
+   - Better cache failure handling (continue with API if Redis fails)
+4. **Metrics & Monitoring**:
+   - Cache hit/miss rates
+   - API quota consumption trends
+   - Optimization solve times
    - Track latency percentiles
-7. **Configuration**: Make cache TTL configurable via environment variables
-8. **Error Recovery**:
-   - Add retry logic for transient API failures
-   - Implement circuit breaker pattern
-   - Better cache failure handling
-9. **API Enhancements**:
-   - Support pagination for large result sets
-   - Add result filtering/sorting options
-   - Allow configurable result limits
+5. **Configuration**:
+   - Make cache TTL configurable via environment variables
+   - Configurable nice-to-have weight (currently hardcoded 0.1)
+   - Rate limit thresholds
+
+#### Future Enhancements
+6. **Multi-region Support**: Add country parameter to optimization requests
+7. **24-hour Freshness**: Reduce availability cache TTL for fresher data
+8. **Background Refresh**: Pre-warm cache for popular titles
+9. **Analytics Dashboard**: Query optimization_requests table for usage patterns
 
 ## Development
 
@@ -408,30 +607,48 @@ occam-api/
 
 ### Testing
 
-The project uses a two-tier testing approach:
+The project uses a comprehensive testing approach:
 
-**Unit Tests** (no external dependencies):
+**Unit Tests** (require Docker containers for database tests):
 ```bash
-cargo test
-```
-- Uses mockall for mocking external dependencies
-- Tests run in milliseconds
-- No Redis or external API required
-- Includes model conversion and validation logic
+# Start required services
+docker-compose up -d postgres redis
 
-**Integration Tests** (requires Redis):
-```bash
-cargo test -- --ignored
+# Run all tests
+cargo test --release
 ```
-- Tests with real Redis connections
-- Marked with `#[ignore]` attribute
-- Run separately to avoid CI/local environment issues
 
 **Test Coverage**:
-- Model conversion (ApiShow → Title)
-- Input validation (empty/whitespace queries)
-- Mock-based service behavior testing
-- Integration tests for real service instances
+- **Title Search Service** (4 tests):
+  - API response conversion (ApiShow → Title)
+  - Missing data handling
+  - Empty/whitespace query validation
+  - Mock-based service testing with trait abstraction
+
+- **Availability Service** (4 tests):
+  - API response parsing and type conversion
+  - Filtering unknown availability types
+  - Price exclusion for subscriptions (only rentals/purchases have prices)
+  - All types handled correctly (Subscription, Rent, Buy, Free, Addon)
+
+- **Optimization Service** (9 tests):
+  - Service mapping with database pricing lookup
+  - Nice-to-have coverage calculation
+  - Simple optimization (disjoint services)
+  - Overlapping service selection (prefers cheaper option)
+  - Nice-to-have behavior (cost dominates, won't add expensive services)
+  - Single service feasibility
+  - Empty catalog error handling
+  - Cheap service cost-benefit analysis
+  - Multiple configurations generation with different weights
+
+**Testing Principles**:
+- All tests are deterministic with exact assertions (no vague "could be 1 or 2" comments)
+- Database-backed tests use real PostgreSQL with seeded data
+- No mocking of database or Redis in optimization tests (integration style)
+- Availability service tests are pure functions (no external dependencies)
+- Tests document expected behavior with mathematical reasoning
+- Fast execution: All 17+ tests complete in ~20-50ms
 
 ## License
 

@@ -1,14 +1,17 @@
-use axum::{Extension, Json};
+use axum::{extract::State, Extension, Json};
+use std::sync::Arc;
 
 use crate::{
     error::AppResult,
     middleware::request_id::RequestId,
     models::{OptimizationRequest, OptimizationResponse},
+    routes::AppState,
     services::optimization,
 };
 
 /// Handler for optimization endpoint
 pub async fn optimize(
+    State(state): State<Arc<AppState>>,
     Extension(request_id): Extension<RequestId>,
     Json(request): Json<OptimizationRequest>,
 ) -> AppResult<Json<OptimizationResponse>> {
@@ -19,7 +22,12 @@ pub async fn optimize(
         "Processing optimization request"
     );
 
-    let response = optimization::optimize_services(request).await?;
+    let response = optimization::optimize_services(
+        state.db_pool.clone(),
+        state.availability_service.clone(),
+        request,
+    )
+    .await?;
 
     tracing::info!(
         request_id = %request_id,

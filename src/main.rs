@@ -8,6 +8,7 @@ mod services;
 
 use config::Config;
 use routes::AppState;
+use services::availability::AvailabilityService;
 use services::title_search::TitleSearchService;
 use std::sync::Arc;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
@@ -40,13 +41,23 @@ async fn main() -> anyhow::Result<()> {
 
     // Initialize services
     let title_searcher = Arc::new(TitleSearchService::new(
+        redis_client.clone(),
+        config.streaming_api_key.clone(),
+        config.streaming_api_url.clone(),
+    ));
+
+    let availability_service = Arc::new(AvailabilityService::new(
         redis_client,
         config.streaming_api_key.clone(),
         config.streaming_api_url.clone(),
     ));
 
     // Create application state
-    let app_state = AppState { title_searcher };
+    let app_state = AppState {
+        db_pool: Arc::new(db_pool),
+        title_searcher,
+        availability_service,
+    };
 
     // Create application router
     let app = routes::create_router(app_state);

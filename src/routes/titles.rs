@@ -6,7 +6,7 @@ use crate::{
     error::AppResult,
     middleware::request_id::RequestId,
     models::Title,
-    services::title_search::TitleSearcher,
+    routes::AppState,
 };
 
 #[derive(Debug, Deserialize)]
@@ -16,7 +16,7 @@ pub struct SearchQuery {
 
 /// Handler for title search endpoint
 pub async fn search(
-    State(searcher): State<Arc<dyn TitleSearcher>>,
+    State(state): State<Arc<AppState>>,
     Extension(request_id): Extension<RequestId>,
     Query(params): Query<SearchQuery>,
 ) -> AppResult<Json<Vec<Title>>> {
@@ -26,7 +26,7 @@ pub async fn search(
         "Processing title search request"
     );
 
-    let titles = searcher.search(&params.q).await?;
+    let titles = state.title_searcher.search(&params.q).await?;
 
     tracing::info!(
         request_id = %request_id,

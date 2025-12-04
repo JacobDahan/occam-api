@@ -31,6 +31,27 @@ services:
       timeout: 3s
       retries: 5
 
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: occam-api
+    environment:
+      DATABASE_URL: postgres://postgres:postgres@postgres:5432/occam
+      REDIS_URL: redis://redis:6379
+      STREAMING_API_KEY: ${STREAMING_API_KEY}
+      STREAMING_API_URL: https://streaming-availability.p.rapidapi.com
+      HOST: 0.0.0.0
+      PORT: ${PORT:-3000}
+    ports:
+      - "${PORT:-3000}:${PORT:-3000}"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
 volumes:
   postgres_data:
   redis_data:
