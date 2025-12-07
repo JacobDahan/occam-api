@@ -221,27 +221,24 @@ impl StreamingProvider for WatchmodeProvider {
                     .collect();
 
                 // Cache IMDB to Watchmode ID mappings for future lookups
+                // Using async write to avoid blocking the search response
                 let mut cached_count = 0;
                 for wm_title in &watchmode_titles {
                     if let Some(ref imdb_id) = wm_title.imdb_id {
                         let cache_key = CacheKey::ImdbToWatchmode(imdb_id.clone());
-                        if let Err(e) = self.cache.set_in_cache(&cache_key, &wm_title.id, IMDB_MAPPING_TTL).await {
-                            tracing::warn!(
-                                imdb_id = %imdb_id,
-                                watchmode_id = wm_title.id,
-                                error = %e,
-                                "Failed to cache IMDB to Watchmode ID mapping"
-                            );
-                        } else {
-                            cached_count += 1;
-                        }
+                        self.cache
+                            .set_in_background(&cache_key, &wm_title.id, IMDB_MAPPING_TTL);
+                        cached_count += 1;
+                    } else {
+                        tracing::debug!(
+                            watchmode_id = wm_title.id,
+                            title_name = %wm_title.name,
+                            "Watchmode title missing IMDB ID - cannot cache mapping"
+                        );
                     }
                 }
 
-                let titles: Vec<Title> = watchmode_titles
-                    .into_iter()
-                    .map(Title::from)
-                    .collect();
+                let titles: Vec<Title> = watchmode_titles.into_iter().map(Title::from).collect();
 
                 tracing::info!(
                     query = %query,
@@ -366,7 +363,7 @@ mod tests {
     use crate::models::WatchmodeSource;
     use std::collections::HashMap;
 
-    fn create_test_provider() -> WatchmodeProvider {
+    async fn create_test_provider() -> WatchmodeProvider {
         let mut service_mappings = HashMap::new();
         service_mappings.insert(203, ("netflix".to_string(), "Netflix".to_string()));
         service_mappings.insert(157, ("hulu".to_string(), "Hulu".to_string()));
@@ -376,28 +373,30 @@ mod tests {
             http_client: reqwest::Client::new(),
             api_key: "test_key".to_string(),
             api_url: "http://test.local".to_string(),
-            cache: Cache::new(redis::Client::open("redis://localhost:6379").unwrap()),
+            cache: Cache::new(redis::Client::open("redis://localhost:6379").unwrap())
+                .await
+                .0,
             service_mappings,
         }
     }
 
-    #[test]
-    fn test_map_service_id_found() {
-        let provider = create_test_provider();
+    #[tokio::test]
+    async fn test_map_service_id_found() {
+        let provider = create_test_provider().await;
         let result = provider.map_service_id(203);
         assert_eq!(result, Some(("netflix".to_string(), "Netflix".to_string())));
     }
 
-    #[test]
-    fn test_map_service_id_not_found() {
-        let provider = create_test_provider();
+    #[tokio::test]
+    async fn test_map_service_id_not_found() {
+        let provider = create_test_provider().await;
         let result = provider.map_service_id(999);
         assert_eq!(result, None);
     }
 
-    #[test]
-    fn test_parse_availability_type_subscription() {
-        let provider = create_test_provider();
+    #[tokio::test]
+    async fn test_parse_availability_type_subscription() {
+        let provider = create_test_provider().await;
         assert_eq!(
             provider.parse_availability_type("sub"),
             Some(AvailabilityType::Subscription)
@@ -408,18 +407,18 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_parse_availability_type_rent() {
-        let provider = create_test_provider();
+    #[tokio::test]
+    async fn test_parse_availability_type_rent() {
+        let provider = create_test_provider().await;
         assert_eq!(
             provider.parse_availability_type("rent"),
             Some(AvailabilityType::Rent)
         );
     }
 
-    #[test]
-    fn test_parse_availability_type_buy() {
-        let provider = create_test_provider();
+    #[tokio::test]
+    async fn test_parse_availability_type_buy() {
+        let provider = create_test_provider().await;
         assert_eq!(
             provider.parse_availability_type("buy"),
             Some(AvailabilityType::Buy)
@@ -430,32 +429,32 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_parse_availability_type_free() {
-        let provider = create_test_provider();
+    #[tokio::test]
+    async fn test_parse_availability_type_free() {
+        let provider = create_test_provider().await;
         assert_eq!(
             provider.parse_availability_type("free"),
             Some(AvailabilityType::Free)
         );
     }
 
-    #[test]
-    fn test_parse_availability_type_addon() {
-        let provider = create_test_provider();
+    #[tokio::test]
+    async fn test_parse_availability_type_addon() {
+        let provider = create_test_provider().await;
         assert_eq!(
             provider.parse_availability_type("addon"),
             Some(AvailabilityType::Addon)
         );
     }
 
-    #[test]
-    fn test_parse_availability_type_invalid() {
-        let provider = create_test_provider();
+    #[tokio::test]
+    async fn test_parse_availability_type_invalid() {
+        let provider = create_test_provider().await;
         assert_eq!(provider.parse_availability_type("unknown"), None);
     }
 
-    #[test]
-    fn test_watchmode_title_deserialization() {
+    #[tokio::test]
+    async fn test_watchmode_title_deserialization() {
         let json = r#"{
             "id": 3173903,
             "name": "Inception",
@@ -472,8 +471,8 @@ mod tests {
         assert_eq!(result.imdb_id, Some("tt1375666".to_string()));
     }
 
-    #[test]
-    fn test_watchmode_source_deserialization() {
+    #[tokio::test]
+    async fn test_watchmode_source_deserialization() {
         let json = r#"{
             "source_id": 203,
             "name": "Netflix",

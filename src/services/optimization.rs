@@ -16,6 +16,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 /// Service catalog entry with pricing
+#[derive(Debug, Clone)]
 struct ServiceInfo {
     id: String,
     name: String,
@@ -79,6 +80,12 @@ pub async fn optimize_services(
             "No streaming services found for provided titles".to_string(),
         ));
     }
+
+    tracing::info!(
+        services_in_catalog = service_catalog.len(),
+        titles_with_services = title_to_services.len(),
+        "Service mappings built"
+    );
 
     // 4. Identify unavailable titles
     let unavailable_must_have: Vec<TitleId> = request

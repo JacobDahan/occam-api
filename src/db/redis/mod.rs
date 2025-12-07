@@ -5,3 +5,4 @@ mod macros;
 pub use cache::create_redis_client;
 pub use cache::Cache;
 pub use cache::CacheKey;
+pub use cache::CacheWriterHandle;

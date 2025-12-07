@@ -176,18 +176,20 @@ mod tests {
     use crate::models::ApiStreamingOption;
     use std::collections::HashMap;
 
-    fn create_test_provider() -> StreamingAvailabilityProvider {
+    async fn create_test_provider() -> StreamingAvailabilityProvider {
         StreamingAvailabilityProvider {
             http_client: reqwest::Client::new(),
             api_key: "test_key".to_string(),
             api_url: "http://test.local".to_string(),
-            cache: Cache::new(redis::Client::open("redis://localhost:6379").unwrap()),
+            cache: Cache::new(redis::Client::open("redis://localhost:6379").unwrap())
+                .await
+                .0,
         }
     }
 
-    #[test]
-    fn test_convert_api_response_success() {
-        let provider = create_test_provider();
+    #[tokio::test]
+    async fn test_convert_api_response_success() {
+        let provider = create_test_provider().await;
 
         let mut streaming_options = HashMap::new();
         streaming_options.insert(
@@ -221,9 +223,9 @@ mod tests {
         assert_eq!(result.services[0].quality, Some("4K".to_string()));
     }
 
-    #[test]
-    fn test_convert_api_response_missing_imdb_id() {
-        let provider = create_test_provider();
+    #[tokio::test]
+    async fn test_convert_api_response_missing_imdb_id() {
+        let provider = create_test_provider().await;
 
         let details = ApiShowDetails {
             imdb_id: None,
@@ -234,9 +236,9 @@ mod tests {
         assert!(result.is_err());
     }
 
-    #[test]
-    fn test_convert_api_response_filters_availability_types() {
-        let provider = create_test_provider();
+    #[tokio::test]
+    async fn test_convert_api_response_filters_availability_types() {
+        let provider = create_test_provider().await;
 
         let mut streaming_options = HashMap::new();
         streaming_options.insert(

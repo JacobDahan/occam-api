@@ -37,10 +37,10 @@ async fn main() -> anyhow::Result<()> {
     sqlx::migrate!("./migrations").run(&db_pool).await?;
     tracing::info!("Migrations complete");
 
-    // Initialize Redis client and cache
+    // Initialize Redis client and cache with async writer
     let redis_client = db::create_redis_client(&config.redis_url)?;
-    let cache = db::Cache::new(redis_client.clone());
-    tracing::info!("Connected to Redis");
+    let (cache, cache_writer_handle) = db::Cache::new(redis_client.clone()).await;
+    tracing::info!("Connected to Redis with async cache writer");
 
     // Initialize streaming provider based on configuration
     let streaming_provider: Arc<dyn StreamingProvider> = match config.streaming_provider {
@@ -81,8 +81,42 @@ async fn main() -> anyhow::Result<()> {
 
     tracing::info!("Server listening on {}", addr);
 
-    // Start server
-    axum::serve(listener, app).await?;
+    // Start server with graceful shutdown
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal(cache_writer_handle))
+        .await?;
 
     Ok(())
+}
+
+/// Waits for shutdown signal (Ctrl+C) and triggers cache writer flush
+async fn shutdown_signal(cache_writer_handle: db::CacheWriterHandle) {
+    let ctrl_c = async {
+        tokio::signal::ctrl_c()
+            .await
+            .expect("Failed to install Ctrl+C handler");
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("Failed to install SIGTERM handler")
+            .recv()
+            .await;
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => {
+            tracing::info!("Received Ctrl+C, shutting down gracefully");
+        },
+        _ = terminate => {
+            tracing::info!("Received SIGTERM, shutting down gracefully");
+        },
+    }
+
+    // Flush pending cache writes
+    cache_writer_handle.shutdown().await;
 }
