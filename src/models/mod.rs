@@ -27,7 +27,6 @@ pub struct Title {
     pub title: String,
     pub title_type: TitleType,
     pub release_year: Option<i32>,
-    pub overview: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -50,8 +49,6 @@ pub struct ApiShow {
     pub imdb_id: Option<String>,
     pub title: String,
     pub show_type: String,
-    #[serde(default)]
-    pub overview: Option<String>,
     #[serde(default)]
     pub release_year: Option<i32>,
     #[serde(default)]
@@ -79,7 +76,6 @@ impl From<ApiShow> for Title {
             title: show.title,
             title_type,
             release_year: show.release_year.or(show.first_air_year),
-            overview: show.overview,
         }
     }
 }
@@ -209,7 +205,6 @@ impl From<WatchmodeTitle> for Title {
             title: watchmode.name,
             title_type,
             release_year: watchmode.year.map(|y| y as i32),
-            overview: None,
         }
     }
 }
@@ -274,7 +269,6 @@ mod tests {
             imdb_id: Some("tt1375666".to_string()),
             title: "Inception".to_string(),
             show_type: "movie".to_string(),
-            overview: Some("A thief who steals corporate secrets".to_string()),
             release_year: Some(2010),
             first_air_year: None,
         };
@@ -293,7 +287,6 @@ mod tests {
             imdb_id: None,
             title: "Unknown Movie".to_string(),
             show_type: "series".to_string(),
-            overview: None,
             release_year: None,
             first_air_year: Some(2020),
         };
@@ -321,7 +314,6 @@ mod tests {
         assert_eq!(title.title, "Inception");
         assert_eq!(title.title_type, TitleType::Movie);
         assert_eq!(title.release_year, Some(2010));
-        assert_eq!(title.overview, None);
     }
 
     #[test]
