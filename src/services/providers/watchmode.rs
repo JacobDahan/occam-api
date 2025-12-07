@@ -254,8 +254,14 @@ impl StreamingProvider for WatchmodeProvider {
     }
 
     async fn fetch_availability(&self, title_id: &TitleId) -> AppResult<StreamingAvailability> {
+        // Capture the original requested TitleId so we can return the availability
+        // using the original ID (IMDB or Watchmode). This ensures callers who
+        // requested by IMDB can still look up availability by that IMDB ID even
+        // though we use Watchmode IDs internally for API calls.
+        let requested_id = title_id.clone();
+
         // Determine the Watchmode ID based on what we have
-        let watchmode_id = match title_id {
+        let watchmode_id = match &requested_id {
             TitleId::Watchmode(id) => *id,
             TitleId::Imdb(imdb_id) => {
                 // Look up Watchmode ID from IMDB ID (cached for 30 days)
@@ -263,9 +269,11 @@ impl StreamingProvider for WatchmodeProvider {
             }
         };
 
+        let cache_key = format!("{}", requested_id);
+
         cached!(
             self.cache,
-            CacheKey::Availability(format!("{}", title_id)),
+            CacheKey::Availability(cache_key.clone()),
             AVAIL_CACHE_TTL,
             async move {
                 // Fetch title details with sources
@@ -305,43 +313,12 @@ impl StreamingProvider for WatchmodeProvider {
                         AppError::ExternalApi(format!("Failed to parse Watchmode response: {}", e))
                     })?;
 
-                // Convert sources to our format
-                let mut services = Vec::new();
-                if let Some(sources) = details.sources {
-                    for source in sources {
-                        // Map Watchmode service ID to our standard ID
-                        if let Some((service_id, service_name)) =
-                            self.map_service_id(source.source_id)
-                        {
-                            if let Some(availability_type) =
-                                self.parse_availability_type(&source.source_type)
-                            {
-                                services.push(ServiceAvailability {
-                                    service_id,
-                                    service_name,
-                                    availability_type,
-                                    quality: source.format,
-                                    link: source.web_url,
-                                });
-                            }
-                        } else {
-                            tracing::debug!(
-                                watchmode_service_id = source.source_id,
-                                service_name = %source.name,
-                                "Unknown Watchmode service ID - update SERVICE_MAPPINGS"
-                            );
-                        }
-                    }
-                }
-
-                let availability = StreamingAvailability {
-                    id: TitleId::Watchmode(watchmode_id),
-                    services,
-                    cached_at: Utc::now(),
-                };
+                // Build StreamingAvailability using a helper for testability
+                let availability =
+                    self.build_availability_from_details(&requested_id, watchmode_id, details);
 
                 tracing::info!(
-                    title_id = %watchmode_id,
+                    requested_id = %requested_id,
                     watchmode_id = watchmode_id,
                     services = availability.services.len(),
                     provider = "watchmode",
@@ -355,6 +332,49 @@ impl StreamingProvider for WatchmodeProvider {
 
     fn clone_for_task(&self) -> Box<dyn StreamingProvider> {
         Box::new(self.clone())
+    }
+}
+
+impl WatchmodeProvider {
+    /// Helper to construct StreamingAvailability from API details.
+    /// Extracted to make testing easier and to ensure we return the
+    /// original requested `TitleId` on the availability struct.
+    fn build_availability_from_details(
+        &self,
+        requested_id: &TitleId,
+        _watchmode_id: u64,
+        details: WatchmodeTitleDetails,
+    ) -> StreamingAvailability {
+        let mut services = Vec::new();
+        if let Some(sources) = details.sources {
+            for source in sources {
+                if let Some((service_id, service_name)) = self.map_service_id(source.source_id) {
+                    if let Some(availability_type) =
+                        self.parse_availability_type(&source.source_type)
+                    {
+                        services.push(ServiceAvailability {
+                            service_id,
+                            service_name,
+                            availability_type,
+                            quality: source.format,
+                            link: source.web_url,
+                        });
+                    }
+                } else {
+                    tracing::debug!(
+                        watchmode_service_id = source.source_id,
+                        service_name = %source.name,
+                        "Unknown Watchmode service ID - update SERVICE_MAPPINGS"
+                    );
+                }
+            }
+        }
+
+        StreamingAvailability {
+            id: requested_id.clone(),
+            services,
+            cached_at: Utc::now(),
+        }
     }
 }
 
@@ -406,6 +426,51 @@ mod tests {
             provider.parse_availability_type("subscription"),
             Some(AvailabilityType::Subscription)
         );
+    }
+
+    #[tokio::test]
+    async fn test_build_availability_from_details_requested_imdb_id() {
+        let provider = create_test_provider().await;
+
+        // Build fake details
+        let details = WatchmodeTitleDetails {
+            sources: Some(vec![WatchmodeSource {
+                source_id: 203,
+                name: "Netflix".to_string(),
+                web_url: Some("https://netflix.example".to_string()),
+                source_type: "sub".to_string(),
+                format: Some("HD".to_string()),
+            }]),
+        };
+
+        let requested = TitleId::Imdb("tt9999999".to_string());
+        let avail = provider.build_availability_from_details(&requested, 12345, details);
+
+        assert_eq!(avail.id, requested);
+        assert_eq!(avail.services.len(), 1);
+        assert_eq!(avail.services[0].service_id, "netflix");
+    }
+
+    #[tokio::test]
+    async fn test_build_availability_from_details_requested_watchmode_id() {
+        let provider = create_test_provider().await;
+
+        let details = WatchmodeTitleDetails {
+            sources: Some(vec![WatchmodeSource {
+                source_id: 203,
+                name: "Netflix".to_string(),
+                web_url: Some("https://netflix.example".to_string()),
+                source_type: "subscription".to_string(),
+                format: None,
+            }]),
+        };
+
+        let requested = TitleId::Watchmode(12345);
+        let avail = provider.build_availability_from_details(&requested, 12345, details);
+
+        assert_eq!(avail.id, requested);
+        assert_eq!(avail.services.len(), 1);
+        assert_eq!(avail.services[0].service_id, "netflix");
     }
 
     #[tokio::test]

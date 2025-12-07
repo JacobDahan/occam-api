@@ -87,6 +87,12 @@ pub async fn optimize_services(
         "Service mappings built"
     );
 
+    tracing::debug!(
+        service_catalog = ?service_catalog,
+        titles_to_services = ?title_to_services,
+        "Service catalog details"
+    );
+
     // 4. Identify unavailable titles
     let unavailable_must_have: Vec<TitleId> = request
         .must_have
