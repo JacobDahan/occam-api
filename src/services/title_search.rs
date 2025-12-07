@@ -1,8 +1,4 @@
-use crate::{
-    error::AppResult,
-    models::Title,
-    services::providers::StreamingProvider,
-};
+use crate::{error::AppResult, models::Title, services::providers::StreamingProvider};
 use std::sync::Arc;
 
 /// Service function for title search
@@ -15,4 +11,3 @@ pub async fn search_titles(
 ) -> AppResult<Vec<Title>> {
     provider.search_titles(query).await
 }
-

@@ -168,10 +168,6 @@ impl StreamingProvider for StreamingAvailabilityProvider {
     fn clone_for_task(&self) -> Box<dyn StreamingProvider> {
         Box::new(self.clone())
     }
-
-    fn name(&self) -> &'static str {
-        "streaming_availability"
-    }
 }
 
 #[cfg(test)]
@@ -202,17 +198,13 @@ mod tests {
                     name: "Netflix".to_string(),
                 },
                 availability_type: "subscription".to_string(),
-                price: None,
                 quality: Some("4K".to_string()),
                 link: Some("https://netflix.com/title/123".to_string()),
             }],
         );
 
         let details = ApiShowDetails {
-            id: "12345".to_string(),
             imdb_id: Some("tt1375666".to_string()),
-            title: "Inception".to_string(),
-            show_type: "movie".to_string(),
             streaming_options,
         };
 
@@ -222,7 +214,10 @@ mod tests {
         assert_eq!(result.services.len(), 1);
         assert_eq!(result.services[0].service_id, "netflix");
         assert_eq!(result.services[0].service_name, "Netflix");
-        assert_eq!(result.services[0].availability_type, AvailabilityType::Subscription);
+        assert_eq!(
+            result.services[0].availability_type,
+            AvailabilityType::Subscription
+        );
         assert_eq!(result.services[0].quality, Some("4K".to_string()));
     }
 
@@ -231,10 +226,7 @@ mod tests {
         let provider = create_test_provider();
 
         let details = ApiShowDetails {
-            id: "12345".to_string(),
             imdb_id: None,
-            title: "Inception".to_string(),
-            show_type: "movie".to_string(),
             streaming_options: HashMap::new(),
         };
 
@@ -256,7 +248,6 @@ mod tests {
                         name: "Netflix".to_string(),
                     },
                     availability_type: "subscription".to_string(),
-                    price: None,
                     quality: Some("HD".to_string()),
                     link: None,
                 },
@@ -266,7 +257,6 @@ mod tests {
                         name: "iTunes".to_string(),
                     },
                     availability_type: "rent".to_string(),
-                    price: None,
                     quality: Some("HD".to_string()),
                     link: None,
                 },
@@ -276,7 +266,6 @@ mod tests {
                         name: "Vudu".to_string(),
                     },
                     availability_type: "buy".to_string(),
-                    price: None,
                     quality: Some("HD".to_string()),
                     link: None,
                 },
@@ -284,17 +273,17 @@ mod tests {
         );
 
         let details = ApiShowDetails {
-            id: "12345".to_string(),
             imdb_id: Some("tt1375666".to_string()),
-            title: "Inception".to_string(),
-            show_type: "movie".to_string(),
             streaming_options,
         };
 
         let result = provider.convert_api_response(details).unwrap();
 
         assert_eq!(result.services.len(), 3);
-        assert_eq!(result.services[0].availability_type, AvailabilityType::Subscription);
+        assert_eq!(
+            result.services[0].availability_type,
+            AvailabilityType::Subscription
+        );
         assert_eq!(result.services[1].availability_type, AvailabilityType::Rent);
         assert_eq!(result.services[2].availability_type, AvailabilityType::Buy);
     }

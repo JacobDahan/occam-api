@@ -8,8 +8,8 @@ use crate::{error::AppResult, models::Title};
 /// Uses collaborative filtering and content-based approaches to find
 /// similar titles to the user's preferences.
 pub async fn get_recommendations(
-    user_titles: Vec<String>,
-    subscribed_services: Vec<String>,
+    _user_titles: Vec<String>,
+    _subscribed_services: Vec<String>,
 ) -> AppResult<Vec<Title>> {
     // TODO: Implement recommendations
     // 1. Fetch metadata for user's preferred titles

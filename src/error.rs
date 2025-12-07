@@ -18,6 +18,7 @@ pub enum AppError {
     HttpClient(#[from] reqwest::Error),
 
     #[error("Not found: {0}")]
+    #[allow(dead_code)] // Part of public error API, may be used in future endpoints
     NotFound(String),
 
     #[error("Invalid input: {0}")]

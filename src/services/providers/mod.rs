@@ -1,5 +1,3 @@
-use tracing::instrument;
-
 /// Streaming data provider abstraction
 ///
 /// This module provides a pluggable architecture for different streaming availability
@@ -87,7 +85,4 @@ pub trait StreamingProvider: Send + Sync {
     ///
     /// Required because providers need to be moved into tokio tasks.
     fn clone_for_task(&self) -> Box<dyn StreamingProvider>;
-
-    /// Provider name for logging and debugging
-    fn name(&self) -> &'static str;
 }

@@ -112,8 +112,8 @@ mod tests {
     #[tokio::test]
     async fn test_cache_roundtrip() {
         // Use a test Redis instance
-        let redis_url = std::env::var("REDIS_URL")
-            .unwrap_or_else(|_| "redis://localhost:6379".to_string());
+        let redis_url =
+            std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://localhost:6379".to_string());
 
         let client = create_redis_client(&redis_url).unwrap();
         let cache = Cache::new(client);
@@ -131,14 +131,18 @@ mod tests {
         assert_eq!(retrieved, Some(value));
 
         // Clean up
-        let mut conn = cache.redis_client.get_multiplexed_async_connection().await.unwrap();
+        let mut conn = cache
+            .redis_client
+            .get_multiplexed_async_connection()
+            .await
+            .unwrap();
         let _: () = conn.del(format!("{}", key)).await.unwrap();
     }
 
     #[tokio::test]
     async fn test_cache_miss() {
-        let redis_url = std::env::var("REDIS_URL")
-            .unwrap_or_else(|_| "redis://localhost:6379".to_string());
+        let redis_url =
+            std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://localhost:6379".to_string());
 
         let client = create_redis_client(&redis_url).unwrap();
         let cache = Cache::new(client);

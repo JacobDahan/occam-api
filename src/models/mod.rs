@@ -11,7 +11,6 @@ pub enum TitleId {
     Watchmode(u64),
 }
 
-
 impl Display for TitleId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -153,11 +152,8 @@ pub enum AvailabilityType {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ApiShowDetails {
-    pub id: String,
     #[serde(default)]
     pub imdb_id: Option<String>,
-    pub title: String,
-    pub show_type: String,
     #[serde(default)]
     pub streaming_options: HashMap<String, Vec<ApiStreamingOption>>,
 }
@@ -169,8 +165,6 @@ pub struct ApiStreamingOption {
     #[serde(rename = "type")]
     pub availability_type: String,
     #[serde(default)]
-    pub price: Option<ApiPrice>,
-    #[serde(default)]
     pub quality: Option<String>,
     #[serde(default)]
     pub link: Option<String>,
@@ -180,14 +174,6 @@ pub struct ApiStreamingOption {
 pub struct ApiService {
     pub id: String,
     pub name: String,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct ApiPrice {
-    #[serde(default)]
-    pub amount: Option<String>,
-    #[serde(default)]
-    pub currency: Option<String>,
 }
 
 // ============================================================================
@@ -202,6 +188,8 @@ pub struct WatchmodeTitle {
     #[serde(rename = "type")]
     pub title_type: String,
     pub year: Option<u32>,
+    #[serde(default)]
+    #[allow(dead_code)] // May be used in future for IMDB fallback
     pub imdb_id: Option<String>,
 }
 
@@ -258,7 +246,6 @@ mod tests {
         let id = TitleId::Watchmode(3173903);
         assert_eq!(format!("{}", id), "3173903");
     }
-
 
     #[test]
     fn test_title_id_serde_imdb() {

@@ -14,7 +14,7 @@ use crate::{
     error::{AppError, AppResult},
     models::{
         AvailabilityType, ServiceAvailability, StreamingAvailability, Title, TitleId,
-        WatchmodeSource, WatchmodeTitle, WatchmodeTitleDetails,
+        WatchmodeTitle, WatchmodeTitleDetails,
     },
     services::providers::StreamingProvider,
 };
@@ -311,15 +311,12 @@ impl StreamingProvider for WatchmodeProvider {
     fn clone_for_task(&self) -> Box<dyn StreamingProvider> {
         Box::new(self.clone())
     }
-
-    fn name(&self) -> &'static str {
-        "watchmode"
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::WatchmodeSource;
     use std::collections::HashMap;
 
     fn create_test_provider() -> WatchmodeProvider {
@@ -443,6 +440,9 @@ mod tests {
         assert_eq!(source.name, "Netflix");
         assert_eq!(source.source_type, "sub");
         assert_eq!(source.format, Some("4K".to_string()));
-        assert_eq!(source.web_url, Some("https://www.netflix.com/title/70131314".to_string()));
+        assert_eq!(
+            source.web_url,
+            Some("https://www.netflix.com/title/70131314".to_string())
+        );
     }
 }
