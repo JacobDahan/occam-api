@@ -5,9 +5,14 @@
 ///
 /// API Flow:
 /// 1. Title Search: /autocomplete-search/ → returns Watchmode ID + IMDB ID
+///    - Proactively caches IMDB → Watchmode ID mappings from search results
 /// 2. Availability: /title/{watchmode_id}/details/ → returns streaming sources
+///    - Uses cached IMDB → Watchmode ID mappings when available
 ///
-/// Alternatively, can use /search/ to convert IMDB ID → Watchmode ID, then fetch details.
+/// Caching Strategy:
+/// - Title search results: 1 hour
+/// - IMDB → Watchmode ID mappings: 30 days (stable IDs)
+/// - Availability data: 1 week
 use crate::{
     cached,
     db::{Cache, CacheKey},
@@ -26,6 +31,7 @@ use std::collections::HashMap;
 
 const TITLE_CACHE_TTL: u64 = 3600; // 1 hour
 const AVAIL_CACHE_TTL: u64 = 604800; // 1 week
+const IMDB_MAPPING_TTL: u64 = 2592000; // 30 days - IMDB IDs are stable
 
 #[derive(Clone)]
 pub struct WatchmodeProvider {
@@ -105,43 +111,63 @@ impl WatchmodeProvider {
     }
 
     /// Lookup Watchmode ID by IMDB ID
+    ///
+    /// This mapping is cached for 30 days since IMDB IDs are stable.
     async fn get_watchmode_id(&self, imdb_id: &str) -> AppResult<u64> {
-        let url = format!("{}/v1/search/", self.api_url);
+        cached!(
+            self.cache,
+            CacheKey::ImdbToWatchmode(imdb_id.to_string()),
+            IMDB_MAPPING_TTL,
+            async move {
+                let url = format!("{}/v1/search/", self.api_url);
 
-        let response = self
-            .http_client
-            .get(&url)
-            .query(&[
-                ("apiKey", self.api_key.as_str()),
-                ("search_field", "imdb_id"),
-                ("search_value", imdb_id),
-            ])
-            .send()
-            .await?;
+                let response = self
+                    .http_client
+                    .get(&url)
+                    .query(&[
+                        ("apiKey", self.api_key.as_str()),
+                        ("search_field", "imdb_id"),
+                        ("search_value", imdb_id),
+                    ])
+                    .send()
+                    .await?;
 
-        if !response.status().is_success() {
-            let status = response.status();
-            let body = response.text().await.unwrap_or_default();
-            return Err(AppError::ExternalApi(format!(
-                "Watchmode API returned status {}: {}",
-                status, body
-            )));
-        }
+                if !response.status().is_success() {
+                    let status = response.status();
+                    let body = response.text().await.unwrap_or_default();
+                    return Err(AppError::ExternalApi(format!(
+                        "Watchmode API returned status {}: {}",
+                        status, body
+                    )));
+                }
 
-        #[derive(Deserialize)]
-        struct SearchResponse {
-            title_results: Vec<WatchmodeTitle>,
-        }
+                #[derive(Deserialize)]
+                struct SearchResponse {
+                    title_results: Vec<WatchmodeTitle>,
+                }
 
-        let search_response: SearchResponse = response.json().await?;
+                let search_response: SearchResponse = response.json().await?;
 
-        search_response
-            .title_results
-            .first()
-            .map(|r| r.id)
-            .ok_or_else(|| {
-                AppError::ExternalApi(format!("No Watchmode ID found for IMDB ID {}", imdb_id))
-            })
+                let watchmode_id = search_response
+                    .title_results
+                    .first()
+                    .map(|r| r.id)
+                    .ok_or_else(|| {
+                        AppError::ExternalApi(format!(
+                            "No Watchmode ID found for IMDB ID {}",
+                            imdb_id
+                        ))
+                    })?;
+
+                tracing::info!(
+                    imdb_id = %imdb_id,
+                    watchmode_id = watchmode_id,
+                    "IMDB to Watchmode ID mapping cached"
+                );
+
+                Ok(watchmode_id)
+            }
+        )
     }
 }
 
@@ -187,18 +213,40 @@ impl StreamingProvider for WatchmodeProvider {
                     AppError::ExternalApi("Invalid Watchmode response format".to_string())
                 })?;
 
-                let titles: Vec<Title> = results_array
+                let watchmode_titles: Vec<WatchmodeTitle> = results_array
                     .iter()
                     .filter_map(|result| {
-                        serde_json::from_value::<WatchmodeTitle>(result.clone())
-                            .map(Title::from)
-                            .ok()
+                        serde_json::from_value::<WatchmodeTitle>(result.clone()).ok()
                     })
+                    .collect();
+
+                // Cache IMDB to Watchmode ID mappings for future lookups
+                let mut cached_count = 0;
+                for wm_title in &watchmode_titles {
+                    if let Some(ref imdb_id) = wm_title.imdb_id {
+                        let cache_key = CacheKey::ImdbToWatchmode(imdb_id.clone());
+                        if let Err(e) = self.cache.set_in_cache(&cache_key, &wm_title.id, IMDB_MAPPING_TTL).await {
+                            tracing::warn!(
+                                imdb_id = %imdb_id,
+                                watchmode_id = wm_title.id,
+                                error = %e,
+                                "Failed to cache IMDB to Watchmode ID mapping"
+                            );
+                        } else {
+                            cached_count += 1;
+                        }
+                    }
+                }
+
+                let titles: Vec<Title> = watchmode_titles
+                    .into_iter()
+                    .map(Title::from)
                     .collect();
 
                 tracing::info!(
                     query = %query,
                     results = titles.len(),
+                    cached_mappings = cached_count,
                     provider = "watchmode",
                     "Title search completed"
                 );
@@ -209,12 +257,11 @@ impl StreamingProvider for WatchmodeProvider {
     }
 
     async fn fetch_availability(&self, title_id: &TitleId) -> AppResult<StreamingAvailability> {
-        // Determine the Watchmode ID and IMDB ID based on what we have
+        // Determine the Watchmode ID based on what we have
         let watchmode_id = match title_id {
             TitleId::Watchmode(id) => *id,
             TitleId::Imdb(imdb_id) => {
-                // Need to look up Watchmode ID from IMDB ID
-                // TODO: Cache this mapping to reduce API calls
+                // Look up Watchmode ID from IMDB ID (cached for 30 days)
                 self.get_watchmode_id(imdb_id).await?
             }
         };

@@ -9,6 +9,7 @@ use crate::error::AppResult;
 pub enum CacheKey {
     TitleSearch(String),
     Availability(String),
+    ImdbToWatchmode(String),
 }
 
 impl Display for CacheKey {
@@ -16,6 +17,7 @@ impl Display for CacheKey {
         match self {
             CacheKey::TitleSearch(query) => write!(f, "search:{}", query.to_lowercase()),
             CacheKey::Availability(id) => write!(f, "avail:{}", id),
+            CacheKey::ImdbToWatchmode(imdb_id) => write!(f, "imdb2wm:{}", imdb_id),
         }
     }
 }
@@ -107,6 +109,12 @@ mod tests {
     fn test_cache_key_display_availability_watchmode() {
         let key = CacheKey::Availability("3173903".to_string());
         assert_eq!(format!("{}", key), "avail:3173903");
+    }
+
+    #[test]
+    fn test_cache_key_display_imdb_to_watchmode() {
+        let key = CacheKey::ImdbToWatchmode("tt1375666".to_string());
+        assert_eq!(format!("{}", key), "imdb2wm:tt1375666");
     }
 
     #[tokio::test]
