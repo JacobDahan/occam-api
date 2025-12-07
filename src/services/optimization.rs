@@ -2,9 +2,9 @@ use crate::{
     error::{AppError, AppResult},
     models::{
         AvailabilityType, OptimizationRequest, OptimizationResponse, ServiceConfiguration,
-        StreamingAvailability, StreamingService,
+        StreamingAvailability, StreamingService, TitleId,
     },
-    services::availability::AvailabilityService,
+    services::providers::StreamingProvider,
 };
 use good_lp::{
     constraint::Constraint, default_solver, variable, Expression, ProblemVariables, SolverModel,
@@ -34,13 +34,13 @@ struct ServiceInfo {
 /// 3. Maximizing "nice to have" coverage (secondary objective)
 pub async fn optimize_services(
     db_pool: Arc<PgPool>,
-    availability_service: Arc<AvailabilityService>,
+    streaming_provider: Arc<dyn StreamingProvider>,
     request: OptimizationRequest,
 ) -> AppResult<OptimizationResponse> {
     let start = Instant::now();
 
     // 1. Combine all titles
-    let all_titles: Vec<String> = request
+    let all_titles: Vec<TitleId> = request
         .must_have
         .iter()
         .chain(request.nice_to_have.iter())
@@ -61,7 +61,7 @@ pub async fn optimize_services(
     );
 
     // 2. Fetch availability data (parallel, cached)
-    let availability_data = availability_service
+    let availability_data = streaming_provider
         .fetch_availability_batch(all_titles)
         .await?;
 
@@ -81,17 +81,17 @@ pub async fn optimize_services(
     }
 
     // 4. Identify unavailable titles
-    let unavailable_must_have: Vec<String> = request
+    let unavailable_must_have: Vec<TitleId> = request
         .must_have
         .iter()
-        .filter(|title| !title_to_services.contains_key(*title))
+        .filter(|title| !title_to_services.contains_key(&title.to_string()))
         .cloned()
         .collect();
 
-    let unavailable_nice_to_have: Vec<String> = request
+    let unavailable_nice_to_have: Vec<TitleId> = request
         .nice_to_have
         .iter()
-        .filter(|title| !title_to_services.contains_key(*title))
+        .filter(|title| !title_to_services.contains_key(&title.to_string()))
         .cloned()
         .collect();
 
@@ -150,7 +150,7 @@ async fn build_service_mappings(
         }
 
         if !services_for_title.is_empty() {
-            title_to_services.insert(availability.imdb_id.clone(), services_for_title);
+            title_to_services.insert(availability.id.to_string(), services_for_title);
         }
     }
 
@@ -221,14 +221,14 @@ fn solve_optimization(
     service_catalog: &[ServiceInfo],
     title_to_services: &HashMap<String, Vec<String>>,
     request: &OptimizationRequest,
-    unavailable_must_have: Vec<String>,
-    unavailable_nice_to_have: Vec<String>,
+    unavailable_must_have: Vec<TitleId>,
+    unavailable_nice_to_have: Vec<TitleId>,
 ) -> AppResult<OptimizationResponse> {
     // Filter to only available titles for optimization
-    let available_must_have: Vec<&String> = request
+    let available_must_have: Vec<&TitleId> = request
         .must_have
         .iter()
-        .filter(|title| title_to_services.contains_key(*title))
+        .filter(|title| title_to_services.contains_key(&title.to_string()))
         .collect();
 
     // If ALL must-have titles are unavailable, return early with empty solution
@@ -285,8 +285,8 @@ impl Solution {
 fn find_solution(
     service_catalog: &[ServiceInfo],
     title_to_services: &HashMap<String, Vec<String>>,
-    available_must_have: &[&String],
-    nice_to_have: &[String],
+    available_must_have: &[&TitleId],
+    nice_to_have: &[TitleId],
     coverage_weight: f64,
     extra_constraint: Option<Constraint>,
 ) -> AppResult<Solution> {
@@ -303,7 +303,7 @@ fn find_solution(
 
     // Constraint: Each available must-have title must be covered by at least one selected service
     for title in available_must_have {
-        if let Some(services) = title_to_services.get(*title) {
+        if let Some(services) = title_to_services.get(&title.to_string()) {
             let mut coverage_expr = Expression::from(0);
             for service_id in services {
                 if let Some(&var) = service_vars.get(service_id) {
@@ -333,7 +333,7 @@ fn find_solution(
 
     // Subtract bonus for nice-to-have coverage
     for title in nice_to_have {
-        if let Some(services) = title_to_services.get(title) {
+        if let Some(services) = title_to_services.get(&title.to_string()) {
             for service_id in services {
                 if let Some(&var) = service_vars.get(service_id) {
                     objective = objective - coverage_weight * var;
@@ -377,8 +377,8 @@ fn find_solution(
 fn generate_configurations(
     service_catalog: &[ServiceInfo],
     title_to_services: &HashMap<String, Vec<String>>,
-    available_must_have: &[&String],
-    nice_to_have: &[String],
+    available_must_have: &[&TitleId],
+    nice_to_have: &[TitleId],
 ) -> Vec<ServiceConfiguration> {
     use std::collections::HashSet;
 
@@ -441,7 +441,7 @@ fn extract_selected_services(
 /// Counts how many nice-to-have titles are covered by selected services
 fn count_nice_to_have_coverage(
     selected_services: &[StreamingService],
-    nice_to_have: &[String],
+    nice_to_have: &[TitleId],
     title_to_services: &HashMap<String, Vec<String>>,
 ) -> usize {
     let selected_ids: HashSet<&str> = selected_services.iter().map(|s| s.id.as_str()).collect();
@@ -449,7 +449,7 @@ fn count_nice_to_have_coverage(
     nice_to_have
         .iter()
         .filter(|title| {
-            if let Some(services) = title_to_services.get(*title) {
+            if let Some(services) = title_to_services.get(&title.to_string()) {
                 services.iter().any(|s| selected_ids.contains(s.as_str()))
             } else {
                 false
@@ -466,9 +466,12 @@ mod tests {
     use sqlx::PgPool;
 
     // Helper to create mock availability data
-    fn create_availability(imdb_id: &str, services: Vec<(&str, &str)>) -> StreamingAvailability {
+    fn create_availability(
+        title_id: TitleId,
+        services: Vec<(&str, &str)>,
+    ) -> StreamingAvailability {
         StreamingAvailability {
-            imdb_id: imdb_id.to_string(),
+            id: title_id,
             services: services
                 .into_iter()
                 .map(|(id, name)| ServiceAvailability {
@@ -499,17 +502,23 @@ mod tests {
         let db_pool = create_test_db_pool().await;
 
         let availability_data = vec![
-            create_availability("tt1234567", vec![("netflix", "Netflix"), ("hulu", "Hulu")]),
             create_availability(
-                "tt2345678",
+                TitleId::Imdb("tt1234567".to_string()),
+                vec![("netflix", "Netflix"), ("hulu", "Hulu")],
+            ),
+            create_availability(
+                TitleId::Imdb("tt2345678".to_string()),
                 vec![("netflix", "Netflix"), ("disney", "Disney+")],
             ),
-            create_availability("tt3456789", vec![("hulu", "Hulu")]),
+            create_availability(
+                TitleId::Imdb("tt3456789".to_string()),
+                vec![("hulu", "Hulu")],
+            ),
         ];
 
         let request = OptimizationRequest {
-            must_have: vec!["tt1234567".to_string()],
-            nice_to_have: vec!["tt2345678".to_string()],
+            must_have: vec![TitleId::Imdb("tt1234567".to_string())],
+            nice_to_have: vec![TitleId::Imdb("tt2345678".to_string())],
         };
 
         let (service_catalog, title_to_services) =
@@ -523,15 +532,15 @@ mod tests {
         // Check service names and pricing from database
         let netflix = service_catalog.iter().find(|s| s.id == "netflix").unwrap();
         assert_eq!(netflix.name, "Netflix");
-        assert_eq!(netflix.cost, 15.49);
+        assert_eq!(netflix.cost, 17.99);
 
         let hulu = service_catalog.iter().find(|s| s.id == "hulu").unwrap();
         assert_eq!(hulu.name, "Hulu");
-        assert_eq!(hulu.cost, 7.99);
+        assert_eq!(hulu.cost, 18.99);
 
         let disney = service_catalog.iter().find(|s| s.id == "disney").unwrap();
         assert_eq!(disney.name, "Disney+");
-        assert_eq!(disney.cost, 7.99);
+        assert_eq!(disney.cost, 18.99);
 
         // Check title mappings
         assert_eq!(title_to_services.len(), 3);
@@ -556,10 +565,10 @@ mod tests {
         ];
 
         let nice_to_have = vec![
-            "tt1111111".to_string(),
-            "tt2222222".to_string(),
-            "tt3333333".to_string(),
-            "tt4444444".to_string(),
+            TitleId::Imdb("tt1111111".to_string()),
+            TitleId::Imdb("tt2222222".to_string()),
+            TitleId::Imdb("tt3333333".to_string()),
+            TitleId::Imdb("tt4444444".to_string()),
         ];
 
         let mut title_to_services = HashMap::new();
@@ -602,7 +611,10 @@ mod tests {
         title_to_services.insert("tt2222222".to_string(), vec!["hulu".to_string()]);
 
         let request = OptimizationRequest {
-            must_have: vec!["tt1111111".to_string(), "tt2222222".to_string()],
+            must_have: vec![
+                TitleId::Imdb("tt1111111".to_string()),
+                TitleId::Imdb("tt2222222".to_string()),
+            ],
             nice_to_have: vec![],
         };
 
@@ -655,7 +667,10 @@ mod tests {
         );
 
         let request = OptimizationRequest {
-            must_have: vec!["tt1111111".to_string(), "tt2222222".to_string()],
+            must_have: vec![
+                TitleId::Imdb("tt1111111".to_string()),
+                TitleId::Imdb("tt2222222".to_string()),
+            ],
             nice_to_have: vec![],
         };
 
@@ -704,8 +719,8 @@ mod tests {
         title_to_services.insert("tt2222222".to_string(), vec!["hulu".to_string()]);
 
         let request = OptimizationRequest {
-            must_have: vec!["tt1111111".to_string()],
-            nice_to_have: vec!["tt2222222".to_string()],
+            must_have: vec![TitleId::Imdb("tt1111111".to_string())],
+            nice_to_have: vec![TitleId::Imdb("tt2222222".to_string())],
         };
 
         let result = solve_optimization(
@@ -749,7 +764,7 @@ mod tests {
         title_to_services.insert("tt1111111".to_string(), vec!["netflix".to_string()]);
 
         let request = OptimizationRequest {
-            must_have: vec!["tt1111111".to_string()],
+            must_have: vec![TitleId::Imdb("tt1111111".to_string())],
             nice_to_have: vec![],
         };
 
@@ -784,7 +799,7 @@ mod tests {
         let title_to_services: HashMap<String, Vec<String>> = HashMap::new();
 
         let request = OptimizationRequest {
-            must_have: vec!["tt1111111".to_string()],
+            must_have: vec![TitleId::Imdb("tt1111111".to_string())],
             nice_to_have: vec![],
         };
 
@@ -792,7 +807,7 @@ mod tests {
             &empty_catalog,
             &title_to_services,
             &request,
-            vec!["tt1111111".to_string()],
+            vec![TitleId::Imdb("tt1111111".to_string())],
             vec![],
         );
 
@@ -801,7 +816,10 @@ mod tests {
         let response = result.unwrap();
         assert_eq!(response.configurations.len(), 0);
         assert_eq!(response.unavailable_must_have.len(), 1);
-        assert_eq!(response.unavailable_must_have[0], "tt1111111");
+        assert_eq!(
+            response.unavailable_must_have[0],
+            TitleId::Imdb("tt1111111".to_string())
+        );
     }
 
     #[test]
@@ -825,8 +843,8 @@ mod tests {
         title_to_services.insert("tt2222222".to_string(), vec!["peacock".to_string()]);
 
         let request = OptimizationRequest {
-            must_have: vec!["tt1111111".to_string()],
-            nice_to_have: vec!["tt2222222".to_string()],
+            must_have: vec![TitleId::Imdb("tt1111111".to_string())],
+            nice_to_have: vec![TitleId::Imdb("tt2222222".to_string())],
         };
 
         let result = solve_optimization(
@@ -867,16 +885,19 @@ mod tests {
         // tt2222222 and tt3333333 are not in title_to_services (unavailable)
 
         let request = OptimizationRequest {
-            must_have: vec!["tt1111111".to_string(), "tt2222222".to_string()],
-            nice_to_have: vec!["tt3333333".to_string()],
+            must_have: vec![
+                TitleId::Imdb("tt1111111".to_string()),
+                TitleId::Imdb("tt2222222".to_string()),
+            ],
+            nice_to_have: vec![TitleId::Imdb("tt3333333".to_string())],
         };
 
         let result = solve_optimization(
             &service_catalog,
             &title_to_services,
             &request,
-            vec!["tt2222222".to_string()],
-            vec!["tt3333333".to_string()],
+            vec![TitleId::Imdb("tt2222222".to_string())],
+            vec![TitleId::Imdb("tt3333333".to_string())],
         )
         .unwrap();
 
@@ -893,9 +914,15 @@ mod tests {
 
         // Should report unavailable titles
         assert_eq!(result.unavailable_must_have.len(), 1);
-        assert_eq!(result.unavailable_must_have[0], "tt2222222");
+        assert_eq!(
+            result.unavailable_must_have[0],
+            TitleId::Imdb("tt2222222".to_string())
+        );
         assert_eq!(result.unavailable_nice_to_have.len(), 1);
-        assert_eq!(result.unavailable_nice_to_have[0], "tt3333333");
+        assert_eq!(
+            result.unavailable_nice_to_have[0],
+            TitleId::Imdb("tt3333333".to_string())
+        );
     }
 
     #[test]
@@ -937,8 +964,11 @@ mod tests {
         title_to_services.insert("tt3333333".to_string(), vec!["disney".to_string()]);
 
         let request = OptimizationRequest {
-            must_have: vec!["tt1111111".to_string()],
-            nice_to_have: vec!["tt2222222".to_string(), "tt3333333".to_string()],
+            must_have: vec![TitleId::Imdb("tt1111111".to_string())],
+            nice_to_have: vec![
+                TitleId::Imdb("tt2222222".to_string()),
+                TitleId::Imdb("tt3333333".to_string()),
+            ],
         };
 
         let result = solve_optimization(

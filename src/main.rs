@@ -6,10 +6,12 @@ mod models;
 mod routes;
 mod services;
 
-use config::Config;
+use config::{Config, StreamingProviderType};
 use routes::AppState;
-use services::availability::AvailabilityService;
-use services::title_search::TitleSearchService;
+use services::providers::{
+    streaming_availability::StreamingAvailabilityProvider, watchmode::WatchmodeProvider,
+    StreamingProvider,
+};
 use std::sync::Arc;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -35,28 +37,39 @@ async fn main() -> anyhow::Result<()> {
     sqlx::migrate!("./migrations").run(&db_pool).await?;
     tracing::info!("Migrations complete");
 
-    // Initialize Redis client
+    // Initialize Redis client and cache
     let redis_client = db::create_redis_client(&config.redis_url)?;
+    let cache = db::Cache::new(redis_client.clone());
     tracing::info!("Connected to Redis");
 
-    // Initialize services
-    let title_searcher = Arc::new(TitleSearchService::new(
-        redis_client.clone(),
-        config.streaming_api_key.clone(),
-        config.streaming_api_url.clone(),
-    ));
-
-    let availability_service = Arc::new(AvailabilityService::new(
-        redis_client,
-        config.streaming_api_key.clone(),
-        config.streaming_api_url.clone(),
-    ));
+    // Initialize streaming provider based on configuration
+    let streaming_provider: Arc<dyn StreamingProvider> = match config.streaming_provider {
+        StreamingProviderType::StreamingAvailability => {
+            tracing::info!("Using Streaming Availability API provider");
+            Arc::new(StreamingAvailabilityProvider::new(
+                cache,
+                config.streaming_api_key.clone(),
+                config.streaming_api_url.clone(),
+            ))
+        }
+        StreamingProviderType::Watchmode => {
+            tracing::info!("Using Watchmode API provider");
+            Arc::new(
+                WatchmodeProvider::new(
+                    cache,
+                    db_pool.clone(),
+                    config.streaming_api_key.clone(),
+                    config.streaming_api_url.clone(),
+                )
+                .await?,
+            )
+        }
+    };
 
     // Create application state
     let app_state = AppState {
         db_pool: Arc::new(db_pool),
-        title_searcher,
-        availability_service,
+        streaming_provider,
     };
 
     // Create application router

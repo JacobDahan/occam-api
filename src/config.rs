@@ -1,5 +1,21 @@
 use serde::Deserialize;
 
+/// Streaming provider selection
+#[derive(Debug, Deserialize, Clone, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum StreamingProviderType {
+    /// Streaming Availability API (via RapidAPI) - cheaper but lower data quality
+    StreamingAvailability,
+    /// Watchmode API - more expensive but better data quality
+    Watchmode,
+}
+
+impl Default for StreamingProviderType {
+    fn default() -> Self {
+        Self::StreamingAvailability
+    }
+}
+
 /// Application configuration loaded from environment variables
 #[derive(Debug, Deserialize, Clone)]
 pub struct Config {
@@ -10,6 +26,10 @@ pub struct Config {
     /// Redis connection URL
     #[serde(default = "default_redis_url")]
     pub redis_url: String,
+
+    /// Which streaming data provider to use
+    #[serde(default)]
+    pub streaming_provider: StreamingProviderType,
 
     /// Streaming Availability API key
     pub streaming_api_key: String,
@@ -36,7 +56,7 @@ fn default_redis_url() -> String {
 }
 
 fn default_streaming_api_url() -> String {
-    "https://streaming-availability.p.rapidapi.com".to_string()
+    "https://api.watchmode.com".to_string()
 }
 
 fn default_host() -> String {

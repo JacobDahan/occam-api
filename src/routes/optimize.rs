@@ -24,7 +24,7 @@ pub async fn optimize(
 
     let response = optimization::optimize_services(
         state.db_pool.clone(),
-        state.availability_service.clone(),
+        state.streaming_provider.clone(),
         request,
     )
     .await?;

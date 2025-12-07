@@ -2,10 +2,7 @@ use axum::{Extension, Json};
 use serde::Deserialize;
 
 use crate::{
-    error::AppResult,
-    middleware::request_id::RequestId,
-    models::Title,
-    services::recommendations,
+    error::AppResult, middleware::request_id::RequestId, models::Title, services::recommendations,
 };
 
 #[derive(Debug, Deserialize)]

@@ -1,10 +1,4 @@
-use axum::{
-    body::Body,
-    extract::Request,
-    http::HeaderValue,
-    middleware::Next,
-    response::Response,
-};
+use axum::{body::Body, extract::Request, http::HeaderValue, middleware::Next, response::Response};
 use uuid::Uuid;
 
 /// HTTP header name for request ID

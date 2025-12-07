@@ -14,7 +14,10 @@ Backend API for the Occam streaming service optimizer. Occam helps customers fin
 - **Database**: PostgreSQL
 - **Cache**: Redis
 - **Solver**: Integer programming (good_lp with microlp - pure Rust MILP solver)
-- **External API**: Streaming Availability API via RapidAPI
+- **External APIs**:
+  - Streaming Availability API via RapidAPI
+  - Watchmode API (alternative provider)
+- **Architecture**: Pluggable provider system via `StreamingProvider` trait
 
 ## Architecture
 
@@ -41,11 +44,83 @@ The Occam API is built with a layered architecture following clean separation of
          │                                  │
          ▼                                  ▼
 ┌─────────────────┐              ┌──────────────────┐
-│  External APIs  │              │   Data Layer     │
-│  (Streaming     │              │  (PostgreSQL +   │
-│   Availability) │              │   Redis cache)   │
-└─────────────────┘              └──────────────────┘
+│  Provider Layer │              │   Data Layer     │
+│  (Pluggable via │              │  (PostgreSQL +   │
+│ StreamingProvider│              │   Redis cache)   │
+│     trait)      │              └──────────────────┘
+└────────┬────────┘
+         │
+         ▼
+┌─────────────────┐
+│  External APIs  │
+│  - Streaming    │
+│   Availability  │
+│  - Watchmode    │
+└─────────────────┘
 ```
+
+### Provider Abstraction
+
+The system uses a **pluggable provider architecture** via the `StreamingProvider` trait. This abstraction layer allows the application to support multiple streaming data sources without changing business logic.
+
+**Key Design Principles**:
+- **Single provider per request**: Each request uses one provider for both title search and availability lookup
+- **Provider-agnostic IDs**: The `TitleId` enum supports both IMDB IDs and provider-specific IDs
+- **Consistent interface**: All providers implement the same methods (`search_titles`, `fetch_availability`, `fetch_availability_batch`)
+- **Easy swapping**: Change providers by updating configuration without modifying service code
+
+**Available Providers**:
+1. **StreamingAvailabilityProvider** (Current default)
+   - Uses Streaming Availability API via RapidAPI
+   - Returns IMDB IDs for all titles
+   - Well-established API with comprehensive US coverage
+
+2. **WatchmodeProvider** (Alternative)
+   - Uses Watchmode API
+   - Returns IMDB IDs when available, otherwise Watchmode IDs
+   - Can be more cost-effective for high-volume lookups
+   - Loads service ID mappings from database at startup
+
+**Provider Trait Methods**:
+- `search_titles(&self, query: &str) -> AppResult<Vec<Title>>`: Search for titles by name
+- `fetch_availability(&self, title_id: &TitleId) -> AppResult<StreamingAvailability>`: Get streaming availability by title ID
+- `fetch_availability_batch(&self, title_ids: Vec<TitleId>) -> AppResult<Vec<StreamingAvailability>>`: Batch fetch for multiple titles (parallelized by default)
+- `clone_for_task(&self) -> Box<dyn StreamingProvider>`: Clone provider for parallel task execution
+- `name(&self) -> &'static str`: Provider name for logging
+
+### Title Identification
+
+The system uses a **flexible title identification system** via the `TitleId` enum to support multiple data providers:
+
+```rust
+pub enum TitleId {
+    Imdb(String),      // IMDB ID (e.g., "tt1375666")
+    Watchmode(u64),    // Watchmode-specific ID
+}
+```
+
+**Why use TitleId enum?**
+- **Provider flexibility**: Different providers use different ID systems
+  - Streaming Availability API: Always has IMDB IDs
+  - Watchmode API: Has Watchmode IDs, IMDB IDs when available
+- **Cost optimization**: Some providers charge less for native ID lookups vs IMDB ID conversions
+- **Graceful fallback**: When IMDB ID is unavailable, use provider-specific ID
+- **Future-proof**: Easy to add new providers (e.g., TMDB, Trakt) without breaking changes
+
+**Serialization Format**:
+The `TitleId` enum serializes as a tagged JSON object:
+```json
+// IMDB ID
+{"Imdb": "tt1375666"}
+
+// Watchmode ID
+{"Watchmode": 3173903}
+```
+
+**Display Format**:
+When converted to string (e.g., for logging or cache keys), TitleId displays just the ID value:
+- `TitleId::Imdb("tt1375666")` → `"tt1375666"`
+- `TitleId::Watchmode(3173903)` → `"3173903"`
 
 ### Data Flow
 
@@ -59,7 +134,8 @@ User Request → Route Handler → Service Layer → Check Redis Cache
                                 Cache Hit                         Cache Miss
                                     │                                │
                                     ▼                                ▼
-                             Return cached data           Query Streaming API
+                             Return cached data           Query Provider API
+                                                          (via StreamingProvider)
                                                                      │
                                                                      ▼
                                                           Store in Redis (TTL)
@@ -71,9 +147,11 @@ User Request → Route Handler → Service Layer → Check Redis Cache
 The title search service:
 - Accepts a search query string
 - Checks Redis cache for recent identical searches (key: `search:{query}`, TTL: 1 hour)
-- On cache miss, queries the Streaming Availability API
-- Transforms API response into our `Title` model
+- On cache miss, delegates to the configured `StreamingProvider`
+- Provider queries its external API (Streaming Availability or Watchmode)
+- Transforms API response into our `Title` model with `TitleId` enum
 - Caches the results before returning
+- Returns `Vec<Title>` with IDs suitable for downstream availability lookups
 
 #### 2. Optimization Flow
 
@@ -106,11 +184,12 @@ User Request → Route Handler → Optimization Service
 ```
 
 The optimization service:
-- Receives lists of "must have" and "nice to have" IMDB IDs
-- **Fetches availability data** from AvailabilityService:
+- Receives lists of "must have" and "nice to have" `TitleId` values
+- **Fetches availability data** via the configured `StreamingProvider`:
   - Parallel API calls using tokio tasks for each title
-  - Checks Redis cache first (key: `avail:{imdb_id}`, TTL: 1 week)
-  - On cache miss, queries Streaming Availability API
+  - Checks Redis cache first (key: `avail:{title_id}`, TTL: 1 week)
+  - On cache miss, provider queries its external API
+  - Handles both IMDB IDs and provider-specific IDs
   - Only considers subscription-based services (not rentals/purchases)
 - **Queries service pricing** from PostgreSQL `streaming_services` table
   - Pre-seeded with current US pricing (Netflix: $15.49, Hulu: $7.99, etc.)
@@ -132,10 +211,12 @@ The optimization service:
 **Example Optimization**:
 ```
 Input:
-  Must Have: [tt1375666 (Inception), tt0468569 (The Dark Knight)]
-  Nice to Have: [tt0816692 (Interstellar)]
+  Must Have: [TitleId::Imdb("tt1375666"), TitleId::Imdb("tt0468569")]
+              (Inception, The Dark Knight)
+  Nice to Have: [TitleId::Imdb("tt0816692")]
+                (Interstellar)
 
-Availability Data (from API):
+Availability Data (from provider):
   - Inception: Available on Netflix, HBO Max
   - The Dark Knight: Available on HBO Max
   - Interstellar: Available on Netflix, Paramount+
@@ -220,10 +301,13 @@ The recommendations service:
 - **Title search results**: 1 hour TTL (key: `search:{query}`)
   - Cache hit: ~4ms response time
   - Cache miss: ~2600ms (external API call)
-- **Streaming availability**: 1 week TTL (key: `avail:{imdb_id}`)
+  - Stores `Vec<Title>` with `TitleId` enum values
+- **Streaming availability**: 1 week TTL (key: `avail:{title_id}`)
+  - Key uses `TitleId::to_string()` (e.g., "tt1375666" or "3173903")
   - Fetched on-demand during optimization requests
   - Parallel fetching using tokio tasks
   - Partial failures allowed (returns successful fetches)
+  - Handles both IMDB IDs and provider-specific IDs
 - **API usage tracking**: Redis counters
   - Monthly quota: `api_usage:{YYYY-MM}` (25K requests/month on PRO tier)
   - Daily usage: `api_usage:daily:{YYYY-MM-DD}` (for monitoring)
@@ -233,7 +317,8 @@ The recommendations service:
 - **Service catalog**: `streaming_services` table
   - Pre-seeded with 10 major US services and pricing
   - Used by optimization solver (Netflix: $15.49, Hulu: $7.99, etc.)
-  - Columns: id, name, base_monthly_cost, country, active
+  - Columns: id, name, base_monthly_cost, country, active, watchmode_service_id
+  - `watchmode_service_id`: Maps Watchmode's service IDs to our standard IDs
 - **API usage analytics**: `api_usage_log` table (optional tracking)
 - **Optimization requests**: `optimization_requests` table (future analytics)
 
@@ -242,6 +327,7 @@ The recommendations service:
 - Performance: Faster than two-tier cache (no PostgreSQL query overhead)
 - Acceptable worst-case: Redis restart means re-warming cache over days (well within API quota)
 - High cache hit rate: 1-week TTL gives ~80% hit rate after initial week
+- Provider-agnostic: Works with any `TitleId` format (IMDB, Watchmode, etc.)
 
 ### Error Handling
 
@@ -400,8 +486,7 @@ Example response:
 ```json
 [
   {
-    "id": "70",
-    "imdb_id": "tt1375666",
+    "id": {"Imdb": "tt1375666"},
     "title": "Inception",
     "title_type": "movie",
     "release_year": 2010,
@@ -410,13 +495,18 @@ Example response:
 ]
 ```
 
+**Note**: The `id` field uses the `TitleId` enum format:
+- IMDB IDs: `{"Imdb": "tt1375666"}`
+- Watchmode IDs: `{"Watchmode": 3173903}`
+
 Features:
-- Searches Streaming Availability API for titles matching query
+- Searches configured provider (Streaming Availability or Watchmode) for titles matching query
 - Returns up to 20 results
 - Caches results in Redis for 1 hour
 - Cache hits return in ~4ms vs ~2600ms for API calls
 - Validates non-empty queries
 - Supports both movies and series
+- Returns `TitleId` suitable for downstream optimization requests
 
 ### Optimization
 ```bash
@@ -424,10 +514,28 @@ POST /api/v1/optimize
 Content-Type: application/json
 
 {
-  "must_have": ["tt1375666"],  // Inception IMDB ID
-  "nice_to_have": ["tt0468569"]  // The Dark Knight IMDB ID
+  "must_have": [
+    {"Imdb": "tt1375666"}   // Inception IMDB ID
+  ],
+  "nice_to_have": [
+    {"Imdb": "tt0468569"}   // The Dark Knight IMDB ID
+  ]
 }
 ```
+
+**Alternative with Watchmode IDs**:
+```json
+{
+  "must_have": [
+    {"Watchmode": 3173903}
+  ],
+  "nice_to_have": [
+    {"Imdb": "tt0468569"}
+  ]
+}
+```
+
+**Note**: You can mix IMDB and Watchmode IDs in the same request. The system handles both formats transparently.
 
 **Status**: ✅ **Implemented**
 
@@ -470,8 +578,18 @@ Example response:
 }
 ```
 
+**Note**: The `unavailable_must_have` and `unavailable_nice_to_have` arrays contain `TitleId` values:
+```json
+{
+  "unavailable_must_have": [
+    {"Imdb": "tt9999999"}
+  ]
+}
+```
+
 Features:
-- Fetches streaming availability from Streaming Availability API
+- Accepts `Vec<TitleId>` for must_have and nice_to_have (supports IMDB and Watchmode IDs)
+- Fetches streaming availability via configured provider
 - Parallel API calls with 1-week Redis caching
 - Queries service pricing from PostgreSQL
 - Solves integer programming problem using microlp (pure Rust)
@@ -479,6 +597,7 @@ Features:
 - Returns optimal service subset with coverage statistics
 - **Returns ordered list of service configurations (cost-optimal to coverage-optimal)**
 - **Up to 5 unique configurations with different cost/coverage trade-offs**
+- Returns unavailable titles as `TitleId` values
 - Graceful handling of partial API failures
 - Rate limiting with quota tracking (25K requests/month)
 
@@ -502,8 +621,9 @@ occam-api/
 │   ├── config.rs            # Configuration management
 │   ├── error.rs             # Error handling
 │   ├── models/
-│   │   └── mod.rs           # Data models (Title, StreamingAvailability, etc.)
+│   │   └── mod.rs           # Data models (Title, TitleId enum, StreamingAvailability, etc.)
 │   ├── db/                  # Database and cache connections
+│   │   └── redis/           # Redis client and caching utilities
 │   ├── middleware/          # HTTP middleware
 │   │   └── request_id.rs    # Request ID generation and tracing
 │   ├── routes/              # HTTP route handlers
@@ -512,37 +632,68 @@ occam-api/
 │   │   ├── optimize.rs      # Optimization endpoint
 │   │   └── recommendations.rs
 │   └── services/            # Business logic
-│       ├── title_search.rs  # Title search with Redis caching
-│       ├── availability.rs  # Streaming availability fetching
+│       ├── mod.rs           # Service module exports
 │       ├── optimization.rs  # Integer programming solver
-│       └── recommendations.rs
+│       ├── recommendations.rs
+│       └── providers/       # Streaming data provider implementations
+│           ├── mod.rs       # StreamingProvider trait definition
+│           ├── streaming_availability.rs  # Streaming Availability API provider
+│           └── watchmode.rs # Watchmode API provider
 ├── migrations/              # Database migrations
 │   ├── 001_create_availability_schema.sql
-│   └── 002_seed_streaming_services.sql
+│   ├── 002_seed_streaming_services.sql
+│   └── 003_add_watchmode_service_ids.sql
 ├── Dockerfile               # Multi-stage Rust build
 └── docker-compose.yml       # PostgreSQL, Redis, and API services
 ```
+
+**Key Files**:
+- **`models/mod.rs`**: Defines `TitleId` enum for flexible title identification
+- **`services/providers/mod.rs`**: `StreamingProvider` trait defining the provider interface
+- **`services/providers/streaming_availability.rs`**: Current default provider (Streaming Availability API)
+- **`services/providers/watchmode.rs`**: Alternative provider (Watchmode API)
+- **`migrations/003_add_watchmode_service_ids.sql`**: Maps Watchmode service IDs to our standard service IDs
 
 ## Implementation Status
 
 ### Completed ✅
 
-1. **Title Search Service**: Fully implemented with Redis caching
-   - Streaming Availability API integration
+1. **Provider Abstraction Layer**: Pluggable streaming data sources
+   - `StreamingProvider` trait defining standard interface
+   - `StreamingAvailabilityProvider`: Current default provider
+   - `WatchmodeProvider`: Alternative provider with database-backed service mappings
+   - Trait-based design supports easy provider swapping
+   - Provider-agnostic business logic in optimization and title search services
+
+2. **TitleId Enum System**: Flexible title identification
+   - Supports IMDB IDs (`TitleId::Imdb(String)`)
+   - Supports Watchmode IDs (`TitleId::Watchmode(u64)`)
+   - Extensible to future providers (TMDB, Trakt, etc.)
+   - Serde serialization/deserialization with tagged format
+   - Display trait for logging and cache keys
+   - Used throughout API request/response models
+
+3. **Title Search Service**: Fully implemented with Redis caching
+   - Delegates to configured `StreamingProvider`
    - 1-hour Redis cache with automatic TTL
    - Input validation and error handling
+   - Returns `Vec<Title>` with provider-specific `TitleId` values
    - Unit tests for model conversion
    - Trait-based design for easy mocking
 
-2. **Availability Service**: Streaming availability data fetching
+4. **Availability Service**: Streaming availability data fetching
+   - Provider-agnostic via `StreamingProvider` trait
    - Parallel API calls using tokio tasks
    - Redis-only caching (1-week TTL)
+   - Handles both IMDB and Watchmode IDs transparently
    - Rate limiting with quota tracking (25K/month)
    - Graceful partial failure handling
    - Only includes pricing for rentals/purchases (NOT subscriptions)
    - Unit tests for API response conversion and type filtering
 
-3. **Optimization Service**: Integer programming solver
+5. **Optimization Service**: Integer programming solver
+   - Accepts `Vec<TitleId>` for must_have and nice_to_have
+   - Returns unavailable titles as `Vec<TitleId>`
    - Database-sourced service pricing (PostgreSQL)
    - On-demand availability fetching with caching
    - Integer programming using microlp (pure Rust, no system dependencies)
@@ -552,12 +703,13 @@ occam-api/
    - Comprehensive unit tests (9 tests, all deterministic)
    - Performance: 105-800ms total optimization time
 
-4. **Database Schema**: PostgreSQL tables
+6. **Database Schema**: PostgreSQL tables
    - `streaming_services`: Service catalog with pricing (10 pre-seeded services)
+   - Added `watchmode_service_id` column for provider mappings
    - `api_usage_log`: API call tracking for analytics
    - `optimization_requests`: Request history for future analytics
 
-5. **Docker Deployment**: Multi-stage containerization
+7. **Docker Deployment**: Multi-stage containerization
    - Rust builder stage with optimized release build
    - Debian slim runtime with minimal dependencies
    - Docker Compose orchestration (PostgreSQL, Redis, API)

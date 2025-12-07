@@ -1,12 +1,13 @@
-use axum::{extract::{Query, State}, Extension, Json};
+use axum::{
+    extract::{Query, State},
+    Extension, Json,
+};
 use serde::Deserialize;
 use std::sync::Arc;
 
 use crate::{
-    error::AppResult,
-    middleware::request_id::RequestId,
-    models::Title,
-    routes::AppState,
+    error::AppResult, middleware::request_id::RequestId, models::Title, routes::AppState,
+    services::title_search,
 };
 
 #[derive(Debug, Deserialize)]
@@ -26,7 +27,7 @@ pub async fn search(
         "Processing title search request"
     );
 
-    let titles = state.title_searcher.search(&params.q).await?;
+    let titles = title_search::search_titles(state.streaming_provider.clone(), &params.q).await?;
 
     tracing::info!(
         request_id = %request_id,

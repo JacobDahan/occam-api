@@ -1,5 +1,7 @@
 pub mod postgres;
-pub mod cache;
+pub mod redis;
 
 pub use postgres::create_pool;
-pub use cache::create_redis_client;
+pub use redis::create_redis_client;
+pub use redis::Cache;
+pub use redis::CacheKey;

@@ -10,8 +10,7 @@ use tower_http::trace::{DefaultOnResponse, TraceLayer};
 use tracing::Level;
 
 use crate::middleware::request_id;
-use crate::services::availability::AvailabilityService;
-use crate::services::title_search::TitleSearcher;
+use crate::services::providers::StreamingProvider;
 use sqlx::PgPool;
 
 pub mod optimize;
@@ -20,8 +19,7 @@ pub mod titles;
 
 pub struct AppState {
     pub db_pool: Arc<PgPool>,
-    pub title_searcher: Arc<dyn TitleSearcher>,
-    pub availability_service: Arc<AvailabilityService>,
+    pub streaming_provider: Arc<dyn StreamingProvider>,
 }
 
 /// Creates the application router with all routes
