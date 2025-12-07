@@ -277,6 +277,7 @@ impl StreamingProvider for WatchmodeProvider {
                     .query(&[
                         ("apiKey", self.api_key.as_str()),
                         ("append_to_response", "sources"),
+                        ("regions", "US"), // TODO: Add support for additional regions
                     ])
                     .send()
                     .await?;

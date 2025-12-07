@@ -137,7 +137,7 @@ impl StreamingProvider for StreamingAvailabilityProvider {
                     .http_client
                     .get(&url)
                     .header("X-RapidAPI-Key", &self.api_key)
-                    .query(&[("country", "us")])
+                    .query(&[("country", "us")]) // TODO: Add support for additional regions
                     .send()
                     .await?;
 
