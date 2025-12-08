@@ -1,19 +1,14 @@
 use serde::Deserialize;
 
 /// Streaming provider selection
-#[derive(Debug, Deserialize, Clone, PartialEq)]
+#[derive(Debug, Deserialize, Clone, PartialEq, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum StreamingProviderType {
     /// Streaming Availability API (via RapidAPI) - cheaper but lower data quality
+    #[default]
     StreamingAvailability,
     /// Watchmode API - more expensive but better data quality
     Watchmode,
-}
-
-impl Default for StreamingProviderType {
-    fn default() -> Self {
-        Self::StreamingAvailability
-    }
 }
 
 /// Application configuration loaded from environment variables

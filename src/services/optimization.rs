@@ -320,7 +320,7 @@ fn find_solution(
             let mut coverage_expr = Expression::from(0);
             for service_id in services {
                 if let Some(&var) = service_vars.get(service_id) {
-                    coverage_expr = coverage_expr + var;
+                    coverage_expr += var;
                 }
             }
             // At least one service must cover this title
@@ -340,7 +340,7 @@ fn find_solution(
     // Add service costs to objective
     for service in service_catalog {
         if let Some(&var) = service_vars.get(&service.id) {
-            objective = objective + service.cost * var;
+            objective += service.cost * var;
         }
     }
 
@@ -349,7 +349,7 @@ fn find_solution(
         if let Some(services) = title_to_services.get(&title.to_string()) {
             for service_id in services {
                 if let Some(&var) = service_vars.get(service_id) {
-                    objective = objective - coverage_weight * var;
+                    objective -= coverage_weight * var;
                 }
             }
         }
