@@ -1,0 +1,10 @@
+# Configuration for cargo-audit
+
+[advisories]
+# Ignore RUSTSEC-2023-0071 (Marvin Attack in rsa crate)
+# This vulnerability is in sqlx-mysql which is a transitive dependency
+# we don't use (this project only uses PostgreSQL, not MySQL).
+# The vulnerable code path is never executed in our application.
+ignore = [
+    "RUSTSEC-2023-0071",
+]
